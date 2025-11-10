@@ -3,6 +3,7 @@ import makeWASocket, {
     useMultiFileAuthState,
     WASocket,
     Browsers,
+    fetchLatestBaileysVersion,
 } from "@whiskeysockets/baileys";
 import * as fs from "fs";
 import * as path from "path";
@@ -44,10 +45,12 @@ export async function createInstance(data: { owner: string; instanceName: string
     }
 
     const { state, saveCreds } = await useMultiFileAuthState(instancePath);
+    const { version } = await fetchLatestBaileysVersion();
 
     const sock = makeWASocket({
         browser: Browsers.macOS("Safari"),
         auth: state,
+        version
     });
 
     const key = `${owner}_${instanceName}`;
