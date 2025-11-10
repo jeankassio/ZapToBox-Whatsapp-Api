@@ -13,6 +13,7 @@ import { startWebhookRetryLoop, clearInstanceWebhooks } from "../utils/webhookQu
 import { InstanceData, ConnectionStatus } from "../types/instance";
 import {instances, instanceStatus, sessionsPath} from "../server";
 import { removeInstancePath } from "../utils/instances";
+import QRCode from "qrcode";
 
 function getInstanceStatus(name: string): ConnectionStatus {
     return instanceStatus.get(name) || "OFFLINE";
@@ -70,7 +71,13 @@ export async function createInstance(data: { owner: string; instanceName: string
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
-            await trySendWebhook("qrcode", instance, [{ qr }]);
+            const qrBase64 = await QRCode.toDataURL(qr);
+            QRCode.toString(qr, { type: "terminal" }, (err, qrTerminal) => {
+                if (!err){
+                    console.log(qrTerminal);
+                }
+            });
+            await trySendWebhook("qrcode", instance, [{ qrBase64 }]);
         }
 
         if (connection === "open") {
