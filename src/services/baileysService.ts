@@ -7,7 +7,7 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys";
 import * as fs from "fs";
 import * as path from "path";
-import * as qrcode from "qrcode-terminal";
+import * as qrcodeTerminal from "qrcode-terminal";
 import { trySendWebhook } from "../utils/webhook";
 import { startWebhookRetryLoop, clearInstanceWebhooks } from "../utils/webhookQueue";
 import { InstanceData, ConnectionStatus } from "../types/instance";
@@ -72,11 +72,9 @@ export async function createInstance(data: { owner: string; instanceName: string
 
         if (qr) {
             const qrBase64 = await QRCode.toDataURL(qr);
-            QRCode.toString(qr, { type: "terminal" }, (err, qrTerminal) => {
-                if (!err){
-                    console.log(qrTerminal);
-                }
-            });
+            
+            qrcodeTerminal.generate(qrBase64);
+
             await trySendWebhook("qrcode", instance, [{ qrBase64 }]);
         }
 
