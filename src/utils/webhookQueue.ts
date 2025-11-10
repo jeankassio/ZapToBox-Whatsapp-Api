@@ -43,7 +43,9 @@ export async function processWebhookQueue(getInstanceStatus: (name: string) => "
         await fs.unlink(filePath);
         continue;
       }
-      if (status !== "ONLINE") continue;
+      if (status !== "ONLINE"){
+        continue;
+      }
 
       try {
         const res = await fetch(payload.targetUrl, {

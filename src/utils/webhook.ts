@@ -1,9 +1,7 @@
-// src/utils/webhook.ts
-import axios from "axios";
 import dotenv from "dotenv";
-import { InstanceInfo } from "../types/instance";
 import { saveWebhookEvent, startWebhookRetryLoop, clearInstanceWebhooks } from "../utils/webhookQueue";
 import { InstanceData } from "../types/instance";
+import { WebhookUrl } from "../config/env.config";
 
 dotenv.config();
 
@@ -17,11 +15,11 @@ export async function trySendWebhook(event: string, instance: InstanceData, data
             profilePictureUrl: instance.profilePictureUrl,
         },
         data,
-        targetUrl: process.env.WEBHOOK_URL!,
+        targetUrl: WebhookUrl
     };
 
     try {
-        const res = await fetch(process.env.WEBHOOK_URL!, {
+        const res = await fetch(WebhookUrl, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload),

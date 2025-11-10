@@ -1,15 +1,12 @@
 import express from "express";
-import dotenv from "dotenv";
 import instanceRoutes from "./routes/instances";
 import { initAllSessions } from "./services/baileysService";
 import path from "path";
 import { ConnectionStatus, InstanceData } from "./types/instance";
-import jwt from "jsonwebtoken";
+import { verifyToken } from "./middlewares/auth";
+import { PortConfig, SessionFolderName } from "./config/env.config";
 
-dotenv.config();
-
-const sessionName = process.env.SESSION_FOLDER_NAME || "sessions";
-export const sessionsPath = path.join(__dirname, "..", sessionName);
+export const sessionsPath = path.join(__dirname, "..", SessionFolderName);
 export const instanceStatus = new Map<string, ConnectionStatus>();
 export const instances: Record<string, InstanceData> = {};
 
@@ -17,23 +14,13 @@ const app = express();
 app.use(express.json());
 
 app.use((req, res, next) => {
-    const token = req.headers?.authorization?.replace(/^Bearer\s+/i, "");;
-    const secret = process.env.JWT_TOKEN;
-
-    if(!token || !secret || !jwt.verify(token, secret)){
-        return res.status(401).json({
-             error: "Invalid Token" 
-        });
-    }
-
-    next();
+    verifyToken(req, res, next);
 });
 
 app.use("/", instanceRoutes);
 
 initAllSessions();
 
-const PORT = process.env.PORT || 3005;
-app.listen(PORT, async () => {
-    console.log(`Servidor rodando na porta ${PORT}`);
+app.listen(PortConfig, async () => {
+    console.log(`Servidor rodando na porta ${PortConfig}`);
 });

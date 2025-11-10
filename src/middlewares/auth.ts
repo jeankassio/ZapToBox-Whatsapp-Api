@@ -1,16 +1,18 @@
 import {Request, Response, NextFunction} from "express";
+import jwt from "jsonwebtoken";
+import { JwtToken } from "../config/env.config";
 
-export function verifyToken(req: Request, resp: Response, next: NextFunction){
+export function verifyToken(req: Request, res: Response, next: NextFunction){
 
-    const authHeader = req.headers["authorization"];
-    const token = authHeader && authHeader.split(" ")[1];
-
-    if(!token || token !== process.env.API_TOKEN){
-        return resp.status(401).json({
-            error: "Invalid Token"
+    const token = req.headers?.authorization?.replace(/^Bearer\s+/i, "");;
+    const secret = JwtToken;
+    
+    if(!token || !secret || !jwt.verify(token, secret)){
+        return res.status(401).json({
+            error: "Invalid Token" 
         });
     }
-
+    
     next();
 
 }

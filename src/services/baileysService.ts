@@ -4,10 +4,10 @@ import makeWASocket, {
     WASocket,
     Browsers,
     fetchLatestBaileysVersion,
+    BaileysEventMap,
 } from "@whiskeysockets/baileys";
 import * as fs from "fs";
 import * as path from "path";
-import * as qrcodeTerminal from "qrcode-terminal";
 import { trySendWebhook } from "../utils/webhook";
 import { startWebhookRetryLoop, clearInstanceWebhooks } from "../utils/webhookQueue";
 import { InstanceData, ConnectionStatus } from "../types/instance";
@@ -51,7 +51,8 @@ export async function createInstance(data: { owner: string; instanceName: string
     const sock = makeWASocket({
         browser: Browsers.macOS("Safari"),
         auth: state,
-        version
+        version,
+
     });
 
     const key = `${owner}_${instanceName}`;
@@ -67,15 +68,35 @@ export async function createInstance(data: { owner: string; instanceName: string
 
     sock.ev.on("creds.update", saveCreds);
 
+    sock.ev.on("messaging-history.set", async({messages, chats, contacts}: BaileysEventMap['messaging-history.set']) => {
+
+        if(contacts && contacts.length > 0){
+            const contactList = contacts.filter(contact => !!contact.name);
+            trySendWebhook("contacts.set", instance, contactList);
+        }
+
+        if(chats && chats.length > 0){
+            trySendWebhook("chats.set", instance, chats);
+        }
+
+        if(messages && messages.length > 0){
+            trySendWebhook("messages.set", instance, messages);
+        }
+
+    });
+
     sock.ev.on("connection.update", async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
             const qrBase64 = await QRCode.toDataURL(qr);
-            
-            qrcodeTerminal.generate(qrBase64);
-
+            QRCode.toString(qr, { type: "utf8" }, (err, qrTerminal) => {
+                if (!err){
+                    console.log(qrTerminal);
+                }
+            });
             await trySendWebhook("qrcode", instance, [{ qrBase64 }]);
+
         }
 
         if (connection === "open") {
@@ -84,8 +105,10 @@ export async function createInstance(data: { owner: string; instanceName: string
 
             const ppUrl = await getProfilePicture(sock);
             instance.profilePictureUrl = ppUrl;
+            
+            console.log(`[${owner}/${instanceName}] OPEN`);
 
-            await trySendWebhook("connection.open", instance, [{ message: "Conectado com sucesso" }]);
+            await trySendWebhook("connection.open", instance, [update]);
         } else if (connection === "close") {
             instance.connectionStatus = "OFFLINE";
             instanceStatus.set(key, "OFFLINE");
@@ -98,10 +121,19 @@ export async function createInstance(data: { owner: string; instanceName: string
             if (shouldReconnect) {
                 await createInstance({ owner, instanceName });
             } else {
-                console.log(`[${owner}/${instanceName}] Sessão encerrada permanentemente`);
+                console.log(`[${owner}/${instanceName}] REMOVED`);
                 instanceStatus.set(key, "REMOVED");
                 await clearInstanceWebhooks(instanceName);
                 removeInstancePath(instancePath);
+
+                sock.ev.removeAllListeners('connection.update');
+                sock.ev.removeAllListeners('messages.upsert');
+                sock.ev.removeAllListeners('messages.update');
+                sock.ev.removeAllListeners('messaging-history.set');
+                sock.ev.removeAllListeners('contacts.upsert');
+                sock.ev.removeAllListeners('chats.upsert');
+                sock.ev.removeAllListeners('creds.update');
+
             }
         }
     });
