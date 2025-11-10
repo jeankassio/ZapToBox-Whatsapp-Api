@@ -4,6 +4,7 @@ import instanceRoutes from "./routes/instances";
 import { initAllSessions } from "./services/baileysService";
 import path from "path";
 import { ConnectionStatus, InstanceData } from "./types/instance";
+import jwt from "jsonwebtoken";
 
 dotenv.config();
 
@@ -16,12 +17,15 @@ const app = express();
 app.use(express.json());
 
 app.use((req, res, next) => {
-    const token = req.headers.authorization?.split(" ")[1];
-    if (!token || token !== process.env.API_TOKEN) {
+    const token = req.headers?.authorization;
+    const secret = process.env.JWT_TOKEN || "";
+
+    if(!token || !jwt.verify(token, secret)){
         return res.status(401).json({
              error: "Invalid Token" 
         });
     }
+
     next();
 });
 
