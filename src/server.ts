@@ -17,10 +17,10 @@ const app = express();
 app.use(express.json());
 
 app.use((req, res, next) => {
-    const token = req.headers?.authorization;
-    const secret = process.env.JWT_TOKEN || "";
+    const token = req.headers?.authorization?.replace(/^Bearer\s+/i, "");;
+    const secret = process.env.JWT_TOKEN;
 
-    if(!token || !jwt.verify(token, secret)){
+    if(!token || !secret || !jwt.verify(token, secret)){
         return res.status(401).json({
              error: "Invalid Token" 
         });
