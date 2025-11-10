@@ -7,29 +7,19 @@ import makeWASocket, {
 import * as fs from "fs";
 import * as path from "path";
 import * as qrcode from "qrcode-terminal";
-import { sendWebhook } from "../utils/webhook";
-import { saveWebhookEvent, startWebhookRetryLoop, clearInstanceWebhooks } from "../utils/webhookQueue";
+import { trySendWebhook } from "../utils/webhook";
+import { startWebhookRetryLoop, clearInstanceWebhooks } from "../utils/webhookQueue";
+import { InstanceData, ConnectionStatus } from "../types/instance";
+import {instances, instanceStatus, sessionsPath} from "../server";
 
-interface InstanceData {
-    owner: string;
-    instanceName: string;
-    socket?: WASocket;
-    connectionStatus: "ONLINE" | "OFFLINE";
-    profilePictureUrl?: string | undefined;
-}
 
-const sessionsPath = path.join(__dirname, "..", "sessions");
-const instances: Record<string, InstanceData> = {};
 
-// Novo: mapa de status para o sistema de fila
-const instanceStatus = new Map<string, "ONLINE" | "OFFLINE" | "REMOVED">();
 
-// Função auxiliar para o webhookQueue saber o status
-function getInstanceStatus(name: string): "ONLINE" | "OFFLINE" | "REMOVED" {
+
+function getInstanceStatus(name: string): ConnectionStatus {
     return instanceStatus.get(name) || "OFFLINE";
 }
 
-// Inicia o loop de reenvio automático a cada 1 minuto
 startWebhookRetryLoop(getInstanceStatus);
 
 export async function initAllSessions() {
@@ -144,36 +134,6 @@ export async function createInstance(data: { owner: string; instanceName: string
 
     console.log(`[${owner}/${instanceName}] Sessão iniciada`);
     return instance;
-}
-
-/**
- * Tenta enviar o webhook e salva localmente se falhar.
- */
-async function trySendWebhook(event: string, instance: InstanceData, data: any[]) {
-    const payload = {
-        event,
-        instance: {
-            instanceName: instance.instanceName,
-            owner: instance.owner,
-            connectionStatus: instance.connectionStatus,
-            profilePictureUrl: instance.profilePictureUrl,
-        },
-        data,
-        targetUrl: process.env.WEBHOOK_URL!,
-    };
-
-    try {
-        const res = await fetch(process.env.WEBHOOK_URL!, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-        });
-
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    } catch (err) {
-        console.warn(`[${instance.owner}/${instance.instanceName}] Falha ao enviar webhook ${event}, salvando localmente...`);
-        await saveWebhookEvent(payload);
-    }
 }
 
 async function getProfilePicture(sock: WASocket): Promise<string | undefined> {

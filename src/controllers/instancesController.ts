@@ -30,3 +30,28 @@ export async function createInstanceController(req: Request, res: Response) {
         });
     }
 }
+
+export async function getInstanceList(req: Request, res: Response){
+
+    try{
+
+        const {owner} = req.query;
+
+        let instances;
+
+        if(owner){
+
+        }else{
+
+        }
+
+    }catch(err: any){
+        console.error("Erro ao listar instâncias:", err);
+        return res.status(500).json({
+            success: false,
+            error: "Erro interno ao listar instâncias.",
+            details: err.message,
+        });
+    }
+
+}
