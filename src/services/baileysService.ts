@@ -5,6 +5,8 @@ import makeWASocket, {
     Browsers,
     fetchLatestBaileysVersion,
     BaileysEventMap,
+    WABrowserDescription,
+    CacheStore,
 } from "@whiskeysockets/baileys";
 import * as fs from "fs";
 import * as path from "path";
@@ -14,6 +16,14 @@ import { InstanceData, ConnectionStatus } from "../types/instance";
 import {instances, instanceStatus, sessionsPath} from "../server";
 import { removeInstancePath } from "../utils/instances";
 import QRCode from "qrcode";
+import { ProxyUrl, SessionClient, SessionName } from "../config/env.config";
+import { release } from "os";
+import NodeCache from "node-cache"
+import { genProxy } from "../utils/proxy";
+import P from "pino";
+
+const msgRetryCounterCache: CacheStore = new NodeCache();
+const userDevicesCache: CacheStore = new NodeCache();
 
 function getInstanceStatus(name: string): ConnectionStatus {
     return instanceStatus.get(name) || "OFFLINE";
@@ -48,11 +58,22 @@ export async function createInstance(data: { owner: string; instanceName: string
     const { state, saveCreds } = await useMultiFileAuthState(instancePath);
     const { version } = await fetchLatestBaileysVersion();
 
+    const browser: WABrowserDescription  = [SessionClient, SessionName, release()];
+    const agents = genProxy(ProxyUrl, ProxyUrl);
+
     const sock = makeWASocket({
-        browser: Browsers.macOS("Safari"),
+        browser,
         auth: state,
         version,
-
+        generateHighQualityLinkPreview: true,
+        syncFullHistory: true,
+        msgRetryCounterCache: msgRetryCounterCache,
+        userDevicesCache: userDevicesCache,
+        agent: agents.wsAgent,
+        fetchAgent: agents.fetchAgent,
+        retryRequestDelayMs: 3 * 1000,
+        maxMsgRetryCount: 1000,
+        logger: P({level: 'silent'}) as any
     });
 
     const key = `${owner}_${instanceName}`;

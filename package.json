@@ -14,9 +14,14 @@
     "@whiskeysockets/baileys": "^6.7.21",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
+    "https-proxy-agent": "^7.0.6",
     "jsonwebtoken": "^9.0.2",
+    "node-cache": "^5.1.2",
+    "pino": "^10.1.0",
     "qrcode": "^1.5.4",
-    "qrcode-terminal": "^0.12.0"
+    "qrcode-terminal": "^0.12.0",
+    "socks-proxy-agent": "^8.0.5",
+    "undici": "^7.16.0"
   },
   "devDependencies": {
     "@types/express": "^5.0.5",
