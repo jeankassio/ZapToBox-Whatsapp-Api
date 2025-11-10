@@ -1,20 +1,10 @@
 import fs from "fs/promises";
 import path from "path";
+import { WebhookPayload } from "../types/webhook";
 
 const WEBHOOK_DIR = path.resolve("./webhook");
 const RETRY_INTERVAL_MS = 60 * 1000; // 1 minuto
 
-interface WebhookPayload {
-  event: string;
-  instance: {
-    instanceName: string;
-    owner: string;
-    connectionStatus: "ONLINE" | "OFFLINE";
-    profilePictureUrl?: string | undefined;
-  };
-  data: any[];
-  targetUrl: string;
-}
 
 async function ensureDir() {
   try {

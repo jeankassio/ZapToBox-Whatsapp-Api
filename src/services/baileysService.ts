@@ -39,13 +39,17 @@ export async function createInstance(data: { owner: string; instanceName: string
     const { owner, instanceName } = data;
 
     const instancePath = path.join(sessionsPath, owner, instanceName);
-    if (!fs.existsSync(path.join(sessionsPath, owner))) fs.mkdirSync(path.join(sessionsPath, owner));
-    if (!fs.existsSync(instancePath)) fs.mkdirSync(instancePath);
+    if (!fs.existsSync(path.join(sessionsPath, owner))){
+        fs.mkdirSync(path.join(sessionsPath, owner));
+    }
+    if (!fs.existsSync(instancePath)) {
+        fs.mkdirSync(instancePath);
+    }
 
     const { state, saveCreds } = await useMultiFileAuthState(instancePath);
 
     const sock = makeWASocket({
-        printQRInTerminal: false,
+        printQRInTerminal: true,
         browser: Browsers.macOS("Safari"),
         auth: state,
     });
@@ -61,10 +65,8 @@ export async function createInstance(data: { owner: string; instanceName: string
 
     instanceStatus.set(key, "OFFLINE");
 
-    // Atualiza credenciais
     sock.ev.on("creds.update", saveCreds);
 
-    // Eventos de conexão
     sock.ev.on("connection.update", async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
@@ -99,7 +101,6 @@ export async function createInstance(data: { owner: string; instanceName: string
         }
     });
 
-    // Eventos principais do Baileys
     sock.ev.on("messages.upsert", async (m) => {
         await trySendWebhook("messages.upsert", instance, [m]);
     });

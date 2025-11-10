@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import { createInstance } from "../services/baileysService";
+import { listInstances } from "../repositories/instanceRepository";
 
 export async function createInstanceController(req: Request, res: Response) {
     try {
@@ -35,15 +36,15 @@ export async function getInstanceList(req: Request, res: Response){
 
     try{
 
-        const {owner} = req.query;
+        const owner = req.query?.owner?.toString().trim();
 
-        let instances;
+        const response = {
+            success: true,
+            message: "Get Instances Successfully",
+            data: listInstances(owner)
+        };
 
-        if(owner){
-
-        }else{
-
-        }
+        res.json(response);
 
     }catch(err: any){
         console.error("Erro ao listar instâncias:", err);
