@@ -11,10 +11,7 @@ import { trySendWebhook } from "../utils/webhook";
 import { startWebhookRetryLoop, clearInstanceWebhooks } from "../utils/webhookQueue";
 import { InstanceData, ConnectionStatus } from "../types/instance";
 import {instances, instanceStatus, sessionsPath} from "../server";
-
-
-
-
+import { removeInstancePath } from "../utils/instances";
 
 function getInstanceStatus(name: string): ConnectionStatus {
     return instanceStatus.get(name) || "OFFLINE";
@@ -49,7 +46,6 @@ export async function createInstance(data: { owner: string; instanceName: string
     const { state, saveCreds } = await useMultiFileAuthState(instancePath);
 
     const sock = makeWASocket({
-        printQRInTerminal: true,
         browser: Browsers.macOS("Safari"),
         auth: state,
     });
@@ -97,6 +93,7 @@ export async function createInstance(data: { owner: string; instanceName: string
                 console.log(`[${owner}/${instanceName}] Sessão encerrada permanentemente`);
                 instanceStatus.set(key, "REMOVED");
                 await clearInstanceWebhooks(instanceName);
+                removeInstancePath(instancePath);
             }
         }
     });
