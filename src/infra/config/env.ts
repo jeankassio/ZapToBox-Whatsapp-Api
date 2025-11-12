@@ -5,7 +5,7 @@ export default class UserConfig{
 
     static sessionFolderName: string = process.env.SESSION_FOLDER_NAME || "sessions";
     static portConfig: string = process.env.PORT || "3000";
-    static jwtToken: string = process.env.JWTT_TOKEN || "";
+    static jwtToken: string = process.env.JWT_TOKEN || "";
     static webhookUrl: string  = process.env.WEBHOOK_URL || "https://localhost";
     static sessionClient: string = process.env.SESSION || "Linux";
     static sessionName: string = process.env.PHONE_NAME || "Edge";
