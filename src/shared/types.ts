@@ -1,4 +1,3 @@
-// src/types/instance.ts
 import {WASocket} from "@whiskeysockets/baileys";
 
 export type ConnectionStatus = "ONLINE" | "OFFLINE" | "REMOVED";
@@ -12,4 +11,16 @@ export interface InstanceInfo {
 
 export interface InstanceData extends InstanceInfo{
     socket?: WASocket;
+}
+
+export interface WebhookPayload {
+  event: string;
+  instance: InstanceInfo;
+  data: any[];
+  targetUrl: string;
+}
+
+export interface ProxyAgent{
+    wsAgent?: any,
+    fetchAgent?: any
 }
