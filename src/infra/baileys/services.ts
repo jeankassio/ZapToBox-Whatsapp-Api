@@ -21,6 +21,7 @@ import UserConfig from "../config/env";
 
 const msgRetryCounterCache: CacheStore = new NodeCache();
 const userDevicesCache: CacheStore = new NodeCache();
+const groupCache = new NodeCache({stdTTL: 5 * 60, useClones: false});
 
 export default class Instance{
 
@@ -67,6 +68,7 @@ export default class Instance{
             maxMsgRetryCount: 1000,
             logger: P({level: 'silent'}) as any,
             markOnlineOnConnect: false,
+            cachedGroupMetadata: async (jid) => groupCache.get(jid),
         });
 
         this.key = `${this.owner}_${this.instanceName}`;
@@ -116,7 +118,7 @@ export default class Instance{
                 const ppUrl = await this.getProfilePicture();
                 this.instance.profilePictureUrl = ppUrl;
                 
-                console.log(`[${this.owner}/${this.instanceName}] Session Iniciated`);
+                console.log(`[${this.owner}/${this.instanceName}] Session Opened`);
                 
                 this.sock.sendPresenceUpdate('unavailable');
 
@@ -136,9 +138,12 @@ export default class Instance{
                     await this.create({ owner:this.owner, instanceName:this.instanceName });
 
                 } else {
+                    
+                    console.log(`[${this.owner}/${this.instanceName}] REMOVED`);
+                    console.log(`Reason: ${DisconnectReason[reason!]}`);
 
                     await trySendWebhook("connection.removed", this.instance, [{ reason }]);
-                    console.log(`[${this.owner}/${this.instanceName}] REMOVED`);
+                    
                     this.setStatus("REMOVED");
 
                     await clearInstanceWebhooks(this.instanceName);
@@ -230,10 +235,15 @@ export default class Instance{
         });
 
         this.sock.ev.on("groups.update", async (groups: BaileysEventMap['groups.update']) => {
+            const [event] = groups;
+            const metadata = await this.sock.groupMetadata(event?.id!);
+            groupCache.set(event?.id!, metadata);
             await trySendWebhook("groups.update", this.instance, [groups]);
         });
 
         this.sock.ev.on("group-participants.update", async (update: BaileysEventMap['group-participants.update']) => {
+            const metadata = await this.sock.groupMetadata(update.id);
+            groupCache.set(update.id, metadata);
             await trySendWebhook("group-participants.update", this.instance, [update]);
         });
 

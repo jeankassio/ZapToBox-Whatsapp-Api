@@ -1,6 +1,7 @@
 import {WASocket} from "@whiskeysockets/baileys";
 
 export type ConnectionStatus = "ONLINE" | "OFFLINE" | "REMOVED";
+export type StatusPresence = "available" | "unavailable" | "composing" | "recording" | "paused";
 
 export interface InstanceInfo {
   instanceName: string;
@@ -10,7 +11,7 @@ export interface InstanceInfo {
 }
 
 export interface InstanceData extends InstanceInfo{
-    socket?: WASocket;
+  socket?: WASocket;
 }
 
 export interface WebhookPayload {
@@ -21,6 +22,7 @@ export interface WebhookPayload {
 }
 
 export interface ProxyAgent{
-    wsAgent?: any,
-    fetchAgent?: any
+  wsAgent?: any,
+  fetchAgent?: any
 }
+
