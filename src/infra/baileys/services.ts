@@ -134,6 +134,8 @@ export default class Instance{
                 this.instance.profilePictureUrl = ppUrl;
                 
                 console.log(`[${this.owner}/${this.instanceName}] Session Iniciated`);
+                
+                this.sock.sendPresenceUpdate('unavailable');
 
                 await trySendWebhook("connection.open", this.instance, [update]);
 
