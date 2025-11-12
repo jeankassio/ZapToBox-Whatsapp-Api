@@ -145,14 +145,16 @@ export default class Instance{
 
                 const reason = (lastDisconnect?.error as any)?.output?.statusCode;
 
-                await trySendWebhook("connection.close", this.instance, [{ reason }]);
-
                 const shouldReconnect = reason !== DisconnectReason.loggedOut;
 
                 if (shouldReconnect) {
+                    
+                    await trySendWebhook("connection.close", this.instance, [{ reason }]);
                     await this.create({ owner:this.owner, instanceName:this.instanceName });
+
                 } else {
 
+                    await trySendWebhook("connection.removed", this.instance, [{ reason }]);
                     console.log(`[${this.owner}/${this.instanceName}] REMOVED`);
                     this.setStatus("REMOVED");
 
