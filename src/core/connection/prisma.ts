@@ -4,7 +4,7 @@ export default class PrismaConnection {
 
     private static conn: PrismaClient =  new PrismaClient();;
     
-    static async addUpdate(instance: string, msg: any){
+    static async save(instance: string, msg: any){
 
         const key = msg.key;
 
@@ -37,6 +37,14 @@ export default class PrismaConnection {
                 messageTimestamp: BigInt(msg.messageTimestamp || 0),
             },
         });
+
+    }
+
+    static async saveMany(instance: string, msgs: any[]){
+
+        for(const msg of msgs){
+            await this.save(instance, msg);
+        }
 
     }
 

@@ -175,6 +175,7 @@ export default class Instance{
             }
 
             if(messages && messages.length > 0){
+                PrismaConnection.saveMany(`${this.instance.owner}_${this.instance.instanceName}`, messages);
                 trySendWebhook("messages.set", this.instance, messages);
             }
 
@@ -209,6 +210,7 @@ export default class Instance{
         });
 
         this.sock.ev.on("messages.upsert", async (messages: BaileysEventMap['messages.upsert']) => {
+            PrismaConnection.saveMany(`${this.instance.owner}_${this.instance.instanceName}`, messages.messages);
             await trySendWebhook("messages.upsert", this.instance, [messages]);
         });
 
