@@ -10,6 +10,7 @@ export default class PrismaConnection {
 
         if(!key || !key.id) return;{
             console.error("Message key or id is missing, skiping...");
+            return;
         }
 
         return PrismaConnection.conn.message.upsert({
@@ -33,7 +34,7 @@ export default class PrismaConnection {
                 fromMe: !!key.fromMe,
                 pushName: msg.pushName || null,
                 content: msg,
-                status: msg.status || null,
+                status: msg.status.toString || null,
                 messageTimestamp: BigInt(msg.messageTimestamp || 0),
             },
         });
