@@ -150,6 +150,10 @@ export default class Instance{
 
                     await clearInstanceWebhooks(this.instanceName);
                     removeInstancePath(this.instancePath);
+                    
+                    PrismaConnection.deleteByInstance(`${this.owner}_${this.instanceName}`);
+
+                    delete instanceConnection[this.key];
 
                     this.sock?.ev.removeAllListeners('connection.update');
                     this.sock?.ev.removeAllListeners('messages.upsert');
