@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import Instance from "../../baileys/services";
-import InstancesRepository from "../../../core/whatsapp/repositories/instances";
+import InstancesRepository from "../../../core/repositories/instances";
 import { instances } from "../../../shared/constants";
 
 export default class InstancesController {
@@ -10,7 +10,7 @@ export default class InstancesController {
             const { owner, instanceName } = req.body;
 
             if (!owner || !instanceName) {
-                return res.status(400).json({ error: "Campos 'owner' e 'instanceName' são obrigatórios." });
+                return res.status(400).json({ error: "Fields 'owner' and 'instanceName' is required" });
             }
 
             const key = `${owner}_${instanceName}`;
@@ -20,7 +20,7 @@ export default class InstancesController {
 
             return res.json({
                 success: true,
-                message: "Instância criada com sucesso!",
+                message: "Instance Created with Successfully!",
                 instance: {
                     owner: instance.owner,
                     instanceName: instance.instanceName,
@@ -29,10 +29,10 @@ export default class InstancesController {
                 },
             });
         } catch (err: any) {
-            console.error("Erro ao criar instância:", err);
+            console.error("Error in Instance Creator", err);
             return res.status(500).json({
                 success: false,
-                error: "Erro interno ao criar instância.",
+                error: "Internal Error in Instance Creator.",
                 details: err.message,
             });
         }
@@ -50,7 +50,7 @@ export default class InstancesController {
             });
 
         }catch(err: any){
-            console.error("Erro ao listar instâncias:", err);
+            console.error("Error in List Instances:", err);
             return res.status(500).json({
                 success: false,
                 details: err.message,

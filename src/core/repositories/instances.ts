@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import path from "path";
-import { InstanceInfo } from "../../../shared/types";
-import { instanceConnection, sessionsPath } from "../../../shared/constants";
+import { InstanceInfo } from "../../shared/types";
+import { instanceConnection, sessionsPath } from "../../shared/constants";
 
 export default class InstancesRepository {
     

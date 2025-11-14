@@ -6,7 +6,8 @@ import makeWASocket, {
     BaileysEventMap,
     WABrowserDescription,
     CacheStore,
-    AuthenticationCreds,
+    getAggregateVotesInPollMessage,
+    WAMessage,
 } from "@whiskeysockets/baileys";
 import * as fs from "fs";
 import * as path from "path";
@@ -18,6 +19,7 @@ import { instanceConnection, instanceStatus, sessionsPath } from "../../shared/c
 import { clearInstanceWebhooks, genProxy, removeInstancePath, trySendWebhook } from "../../shared/utils";
 import { ConnectionStatus, InstanceData } from "../../shared/types";
 import UserConfig from "../config/env";
+import PrismaConnection from "../../core/connection/prisma";
 
 const msgRetryCounterCache: CacheStore = new NodeCache();
 const userDevicesCache: CacheStore = new NodeCache();
@@ -211,7 +213,32 @@ export default class Instance{
         });
 
         this.sock.ev.on("messages.update", async (updates: BaileysEventMap['messages.update']) => {
-            await trySendWebhook("messages.update", this.instance, [updates]);
+
+            const nupdates = await Promise.all(
+                updates.map(async (message) => {
+                    const { key, update } = message;
+                    if(update.pollUpdates){
+                        const pollCreation = await PrismaConnection.getMessageById(key.id!) as any;
+                        if(pollCreation?.message){
+                            const pollVotes = getAggregateVotesInPollMessage({
+                                message: pollCreation.message, 
+                                pollUpdates: update.pollUpdates
+                            });
+
+                            const newUpdate = { 
+                                ...update, 
+                                pollVotes
+                            } as any;
+
+                            return { ...message, update: newUpdate } as Partial<WAMessage>;
+                            
+                        }
+                    }
+                    return message;
+                })
+            );
+
+            await trySendWebhook("messages.update", this.instance, [nupdates]);
         });
 
         this.sock.ev.on("messages.delete", async (deletes: BaileysEventMap['messages.delete']) => {

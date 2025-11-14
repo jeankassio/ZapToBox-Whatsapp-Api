@@ -2,7 +2,7 @@ import * as fs from "fs";
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { ProxyAgent as UndiciProxyAgent } from 'undici';
-import { InstanceData, ProxyAgent, WebhookPayload } from './types';
+import { ConnectionStatus, InstanceData, ProxyAgent, WebhookPayload } from './types';
 import path from "path";
 import UserConfig from "../infra/config/env"
 
@@ -95,7 +95,7 @@ export async function saveWebhookEvent(payload: WebhookPayload) {
 /**
  * Tenta reenviar todos os webhooks pendentes no diretório
  */
-export async function processWebhookQueue(getInstanceStatus: (name: string) => "ONLINE" | "OFFLINE" | "REMOVED") {
+export async function processWebhookQueue(getInstanceStatus: (name: string) => ConnectionStatus) {
     try {
         await ensureDir();
         const files = await fs.promises.readdir(UserConfig.webhook_queue_dir);
@@ -106,25 +106,25 @@ export async function processWebhookQueue(getInstanceStatus: (name: string) => "
         const payload: WebhookPayload = JSON.parse(raw);
 
         const status = getInstanceStatus(payload.instance.instanceName);
-        if (status === "REMOVED") {
-            await fs.promises.unlink(filePath);
-            continue;
-        }
-        if (status !== "ONLINE"){
+
+        if(status !== "ONLINE"){
+            if(status === "REMOVED"){
+                await fs.promises.unlink(filePath);
+            }
             continue;
         }
 
         try {
             const res = await fetch(payload.targetUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
             });
 
             if (res.ok) {
-            await fs.promises.unlink(filePath);
+                await fs.promises.unlink(filePath);
             } else {
-            console.warn(`Falha ao reenviar webhook ${file}: ${res.statusText}`);
+                console.warn(`Falha ao reenviar webhook ${file}: ${res.statusText}`);
             }
         } catch (err) {
             console.warn(`Erro ao tentar reenviar webhook ${file}:`, (err as Error).message);
@@ -137,12 +137,13 @@ export async function processWebhookQueue(getInstanceStatus: (name: string) => "
 
 export async function clearInstanceWebhooks(instanceName: string) {
     try {
+        
         await ensureDir();
         const files = await fs.promises.readdir(UserConfig.webhook_queue_dir);
         const related = files.filter(f => f.startsWith(`${instanceName}-`));
 
         for (const file of related) {
-        await fs.promises.unlink(path.join(UserConfig.webhook_queue_dir, file));
+            await fs.promises.unlink(path.join(UserConfig.webhook_queue_dir, file));
         }
     } catch (err) {
         console.error(`Erro ao remover webhooks da instância ${instanceName}:`, err);

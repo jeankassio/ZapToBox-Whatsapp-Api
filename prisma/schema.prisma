@@ -1,0 +1,28 @@
+// schema.prisma
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Message {
+  id                 Int       @id @default(autoincrement())
+  instance           String
+  messageId          String
+  remoteJid          String
+  senderLid          String?
+  fromMe             Boolean
+  pushName           String?
+  content            Json
+  status             String?
+  messageTimestamp   BigInt
+
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  @@unique([instance, messageId], name: "instance_messageId")
+  @@index([instance])
+}

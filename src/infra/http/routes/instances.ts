@@ -10,8 +10,8 @@ export default class InstanceRoutes{
         const instancesController = new InstancesController();
 
         this.router
-            .post("/createInstance", instancesController.create)
-            .get("/getInstances", instancesController.get);
+            .post("/create", instancesController.create)
+            .get("/get", instancesController.get);
 
         return this.router;
 
