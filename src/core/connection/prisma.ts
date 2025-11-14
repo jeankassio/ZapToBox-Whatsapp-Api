@@ -9,7 +9,6 @@ export default class PrismaConnection {
         const key = msg.key;
 
         if(!key || !key.id) return;{
-            console.error("Message key or id is missing, skiping...");
             return;
         }
 
