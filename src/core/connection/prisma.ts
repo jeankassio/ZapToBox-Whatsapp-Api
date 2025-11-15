@@ -1,10 +1,12 @@
-import { PrismaClient } from "@prisma/client";
+import { Prisma, PrismaClient } from "@prisma/client";
+import { JsonValue } from "@prisma/client/runtime/library";
+import { Contact } from "../../shared/types";
 
 export default class PrismaConnection {
 
     private static conn: PrismaClient =  new PrismaClient();;
     
-    static async save(instance: string, msg: any){
+    static async saveMessages(instance: string, msg: any): Promise<any> {
 
         const key = msg.key;
 
@@ -40,21 +42,69 @@ export default class PrismaConnection {
 
     }
 
-    static async saveMany(instance: string, msgs: any[]){
+    static async saveManyMessages(instance: string, msgs: any[]): Promise<void>{
 
         for(const msg of msgs){
-            await this.save(instance, msg);
+            await this.saveMessages(instance, msg);
         }
 
     }
 
-    static async deleteByInstance(instance: string) {
-        return PrismaConnection.conn.message.deleteMany({
+    static async saveContact(instance: string, contact: Contact): Promise<any> {
+        const { jid, lid, name } = contact;
+
+        if (!jid && !lid) return;
+
+        const data = {
+            instance,
+            name: name ?? null,
+            jid: jid ?? null,
+            lid: lid ?? null,
+        };
+
+        if(jid){
+            try {
+                return await PrismaConnection.conn.contact.upsert({
+                    where: {
+                        instance_jid: { instance, jid }
+                    },
+                    update: data,
+                    create: data
+                });
+            } catch (_) {}
+        }else if(lid){
+            return await PrismaConnection.conn.contact.upsert({
+                where: {
+                    instance_lid: { instance, lid }
+                },
+                update: data,
+                create: data
+            });
+        }else{
+            return;
+        }
+
+    }
+
+    static async saveManyContacts(instance: string, contacts: Contact[]): Promise<void>{
+        for(const contact of contacts){
+            await this.saveContact(instance, contact);
+        }
+    }
+
+    static async deleteByInstance(instance: string): Promise<Prisma.BatchPayload>{
+        PrismaConnection.conn.message.deleteMany({
+            where: { instance },
+        });
+        PrismaConnection.conn.chat.deleteMany({
+            where: { instance },
+        });
+        return PrismaConnection.conn.contact.deleteMany({
             where: { instance },
         });
     }
 
-    static async getMessageByInstance(instance: string) {
+    static async getMessageByInstance(instance: string): Promise<any[]> {
         const allData = await PrismaConnection.conn.message.findMany({
             where: { instance },
             orderBy: { messageTimestamp: "desc" },
@@ -62,7 +112,7 @@ export default class PrismaConnection {
         return await Promise.all(allData.map(async (data) => data.content));
     }
 
-    static async getMessageById(messageId: string) {
+    static async getMessageById(messageId: string): Promise<JsonValue | undefined> {
         const allData = await PrismaConnection.conn.message.findFirst({
             where: { messageId }
         });

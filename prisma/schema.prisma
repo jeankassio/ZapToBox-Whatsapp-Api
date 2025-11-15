@@ -9,20 +9,40 @@ datasource db {
 }
 
 model Message {
-  id                 Int       @id @default(autoincrement())
-  instance           String
-  messageId          String
-  remoteJid          String
-  senderLid          String?
-  fromMe             Boolean
-  pushName           String?
-  content            Json
-  status             String?
-  messageTimestamp   BigInt
-
-  createdAt          DateTime  @default(now())
-  updatedAt          DateTime  @updatedAt
+  id               Int      @id @default(autoincrement())
+  instance         String
+  messageId        String
+  remoteJid        String
+  senderLid        String?
+  fromMe           Boolean
+  pushName         String?
+  content          Json
+  status           String?
+  messageTimestamp BigInt
 
   @@unique([instance, messageId], name: "instance_messageId")
+  @@index([instance])
+  @@index([remoteJid])
+}
+
+model Contact {
+  id         Int     @id @default(autoincrement())
+  instance   String
+  name       String?
+  jid        String?
+  lid        String?
+
+  @@unique([instance, jid], name: "instance_jid")
+  @@unique([instance, lid], name: "instance_lid")
+  @@index([instance])
+}
+
+model Chat {
+  id        Int    @id @default(autoincrement())
+  instance  String
+  jid       String
+  data      Json
+
+  @@unique([instance, jid], name: "instance_chat_jid")
   @@index([instance])
 }

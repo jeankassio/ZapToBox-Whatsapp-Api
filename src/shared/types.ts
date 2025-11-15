@@ -26,3 +26,8 @@ export interface ProxyAgent{
   fetchAgent?: any
 }
 
+export interface Contact{
+  jid?: string;
+  name?: string;
+  lid?: string;
+}

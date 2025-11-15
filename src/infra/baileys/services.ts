@@ -8,6 +8,7 @@ import makeWASocket, {
     CacheStore,
     getAggregateVotesInPollMessage,
     WAMessage,
+    proto,
 } from "@whiskeysockets/baileys";
 import * as fs from "fs";
 import * as path from "path";
@@ -71,6 +72,7 @@ export default class Instance{
             logger: P({level: 'silent'}) as any,
             markOnlineOnConnect: false,
             cachedGroupMetadata: async (jid) => groupCache.get(jid),
+            getMessage: async (key) => await PrismaConnection.getMessageById(key.id!) as proto.IMessage,
         });
 
         this.key = `${this.owner}_${this.instanceName}`;
@@ -170,8 +172,7 @@ export default class Instance{
         this.sock.ev.on("messaging-history.set", async({messages, chats, contacts}: BaileysEventMap['messaging-history.set']) => {
 
             if(contacts && contacts.length > 0){
-                const contactFiltered = contacts.filter(contact => !!contact.name);
-                trySendWebhook("contacts.set", this.instance, contactFiltered);
+                trySendWebhook("contacts.set", this.instance, contacts);
             }
 
             if(chats && chats.length > 0){
@@ -179,7 +180,7 @@ export default class Instance{
             }
 
             if(messages && messages.length > 0){
-                PrismaConnection.saveMany(`${this.instance.owner}_${this.instance.instanceName}`, messages);
+                PrismaConnection.saveManyMessages(`${this.instance.owner}_${this.instance.instanceName}`, messages);
                 trySendWebhook("messages.set", this.instance, messages);
             }
 
@@ -206,6 +207,13 @@ export default class Instance{
         });
 
         this.sock.ev.on("contacts.upsert", async (contacts: BaileysEventMap['contacts.upsert']) => {
+
+            if(typeof contacts === 'object' && !Array.isArray(contacts)){
+                PrismaConnection.saveContact(`${this.instance.owner}_${this.instance.instanceName}`, contacts);
+            }else{
+                PrismaConnection.saveManyContacts(`${this.instance.owner}_${this.instance.instanceName}`, contacts);
+            }
+
             await trySendWebhook("contacts.upsert", this.instance, [contacts]);
         });
 
@@ -214,7 +222,7 @@ export default class Instance{
         });
 
         this.sock.ev.on("messages.upsert", async (messages: BaileysEventMap['messages.upsert']) => {
-            PrismaConnection.saveMany(`${this.instance.owner}_${this.instance.instanceName}`, messages.messages);
+            PrismaConnection.saveMessages(`${this.instance.owner}_${this.instance.instanceName}`, messages.messages);
             await trySendWebhook("messages.upsert", this.instance, [messages]);
         });
 
