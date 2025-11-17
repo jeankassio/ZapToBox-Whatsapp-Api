@@ -1,4 +1,3 @@
-import { Request, Response } from "express";
 import { instances } from "../../../shared/constants";
 import { StatusPresence } from "../../../shared/types";
 import { AnyMessageContent, delay, WASocket } from "@whiskeysockets/baileys";

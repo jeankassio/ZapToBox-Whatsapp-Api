@@ -55,15 +55,16 @@ export default class PrismaConnection {
 
         if (!jid && !lid) return;
 
-        const data = {
-            instance,
-            name: name ?? null,
-            jid: jid ?? null,
-            lid: lid ?? null,
-        };
+        try{
 
-        if(jid){
-            try {
+            const data = {
+                instance,
+                name: name ?? null,
+                jid: jid ?? null,
+                lid: lid ?? null,
+            };
+
+            if(jid){
                 return await PrismaConnection.conn.contact.upsert({
                     where: {
                         instance_jid: { instance, jid }
@@ -71,17 +72,19 @@ export default class PrismaConnection {
                     update: data,
                     create: data
                 });
-            } catch (_) {}
-        }else if(lid){
-            return await PrismaConnection.conn.contact.upsert({
-                where: {
-                    instance_lid: { instance, lid }
-                },
-                update: data,
-                create: data
-            });
-        }else{
-            return;
+            }else if(lid){
+                return await PrismaConnection.conn.contact.upsert({
+                    where: {
+                        instance_lid: { instance, lid }
+                    },
+                    update: data,
+                    create: data
+                });
+            }
+
+        }catch(err){
+            console.error(err);
+            return false;
         }
 
     }
@@ -104,12 +107,12 @@ export default class PrismaConnection {
         });
     }
 
-    static async getMessageByInstance(instance: string): Promise<any[]> {
+    static async getMessageByInstance(instance: string): Promise<JsonValue[] | undefined> {
         const allData = await PrismaConnection.conn.message.findMany({
             where: { instance },
             orderBy: { messageTimestamp: "desc" },
         });
-        return await Promise.all(allData.map(async (data) => data.content));
+        return await Promise.all(allData?.map(async (data) => data.content));
     }
 
     static async getMessageById(messageId: string): Promise<JsonValue | undefined> {
