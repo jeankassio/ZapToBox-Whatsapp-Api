@@ -151,7 +151,65 @@ export default class ChatRoutes{
                     return res.status(200).json(result);
                 }
 
-            });
+            })
+            .post("/deleteChat/:owner/:instanceName", async(req: Request, res: Response) => {
+
+                const owner = req.params.owner;
+                const instanceName = req.params.instanceName;
+                
+                if(!owner || !instanceName){
+                    return res.status(400).json({
+                         error: "Owner and instanceName are required"
+                    });
+                }
+
+                const {remoteJid} = req.body;
+
+                if(!remoteJid){
+                    return res.status(400).json({
+                         error: "messageId is required"
+                    });
+                }
+
+                const chatController = new ChatController(owner, instanceName);
+                const result = await chatController.deleteChat(remoteJid);
+
+                if(result?.error){
+                    return res.status(500).json(result);
+                }else{
+                    return res.status(200).json(result);
+                }
+
+            })
+            .post("/unpin/:owner/:instanceName", async(req: Request, res: Response) => {
+
+                const owner = req.params.owner;
+                const instanceName = req.params.instanceName;
+                
+                if(!owner || !instanceName){
+                    return res.status(400).json({
+                         error: "Owner and instanceName are required"
+                    });
+                }
+
+                const {remoteJid, pin} = req.body;
+
+                if(!remoteJid || !pin){
+                    return res.status(400).json({
+                         error: "messageId and pin is required"
+                    });
+                }
+
+                const chatController = new ChatController(owner, instanceName);
+                const result = await chatController.pinChat(remoteJid, pin);
+
+                if(result?.error){
+                    return res.status(500).json(result);
+                }else{
+                    return res.status(200).json(result);
+                }
+
+            })
         return this.router;
 
     }

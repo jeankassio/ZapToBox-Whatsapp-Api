@@ -1,6 +1,8 @@
+import { Prisma } from "@prisma/client";
 import { instances } from "../../../shared/constants";
 import { StatusPresence } from "../../../shared/types";
 import { AnyMessageContent, delay, WAMessage, WAMessageKey, WASocket } from "@whiskeysockets/baileys";
+import PrismaConnection from "../../../core/connection/prisma";
 
 export default class MessagesController {
 
@@ -92,6 +94,45 @@ export default class MessagesController {
             return {
                 success: false,
                 error: "Failed to mark message as read.",
+            };
+
+        }
+
+    }
+
+    async unStar(messageId: string, remoteJid: string, star: boolean){
+
+        try{
+            
+            const message: WAMessage | undefined = await PrismaConnection.getMessageById(messageId);
+
+            if(!message){
+                return {
+                    success: false,
+                    error: "Failed to change star status in message, message not found.",
+                };
+            }
+
+            await this.sock?.chatModify({
+                star: {
+                    messages: [{
+                        id: message?.key.id!,
+                        fromMe: message?.key?.fromMe!
+                    }],
+                    star
+                }
+            }, remoteJid);
+            
+            return {
+                success: true,
+                message: "Message marked star successfully.",
+            };
+
+        }catch(err){
+
+            return {
+                success: false,
+                error: "Failed to change star status in message.",
             };
 
         }

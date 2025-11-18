@@ -62,7 +62,7 @@ export default class ChatController {
         
     }
 
-    async arquiveChat(jid: string, archive: boolean){
+    async arquiveChat(remoteJid: string, archive: boolean){
 
         if(!this.sock){
             return {
@@ -73,7 +73,16 @@ export default class ChatController {
 
         try{
 
-            await this.sock.chatModify({ archive, lastMessages: [] }, jid);
+            const lastMessage: WAMessage | undefined = await PrismaConnection.getLastMessageByInstance(this.instance!, remoteJid);
+
+            if(!lastMessage){
+                return {
+                    success: false,
+                    error: "Failed to change chat archive status, message not found",
+                };
+            }
+
+            await this.sock.chatModify({ archive, lastMessages: [lastMessage] }, remoteJid);
 
             return {
                 success: true,
@@ -127,7 +136,16 @@ export default class ChatController {
 
         try{
 
-            await this.sock.chatModify({ markRead, lastMessages: [] }, remoteJid);
+            const lastMessage: WAMessage | undefined = await PrismaConnection.getLastMessageByInstance(this.instance!, remoteJid);
+
+            if(!lastMessage){
+                return {
+                    success: false,
+                    error: "Failed to mark chat as read, message not found",
+                };
+            }
+
+            await this.sock.chatModify({ markRead, lastMessages: [lastMessage] }, remoteJid);
 
             return {
                 success: true,
@@ -140,9 +158,69 @@ export default class ChatController {
                 success: false,
                 error: "Failed to mark chat as read.",
             };
-            
+
         }
     
+    }
+
+    async deleteChat(remoteJid: string){
+        
+        try{
+
+            const lastMessage: WAMessage | undefined = await PrismaConnection.getLastMessageByInstance(this.instance!, remoteJid);
+
+            if(!lastMessage){
+                return {
+                    success: false,
+                    error: "Failed to delete chat, message not found"
+                };
+            }
+
+            await this.sock?.chatModify({
+                delete: true,
+                lastMessages: [
+                    lastMessage
+                ]
+                },
+                remoteJid
+            );
+
+            return {
+                success: true,
+                error: "Chat has deleted successfully"
+            };
+
+        }catch(err){
+
+            return {
+                success: false,
+                error: "Failed to delete chat"
+            };
+
+        }
+        
+    }
+
+    async pinChat(remoteJid: string, pin: boolean){
+        
+        try{
+
+            await this.sock?.chatModify({pin},remoteJid);
+
+            return {
+                success: true,
+                error: "Pin changed successfully"
+            };
+
+        }catch(err){
+
+            return {
+                success: false,
+                error: "Failed to change pin"
+            };
+
+        }
+        
     }
 
 }

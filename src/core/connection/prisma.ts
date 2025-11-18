@@ -1,7 +1,9 @@
 import { Prisma, PrismaClient } from "@prisma/client";
 import { JsonValue } from "@prisma/client/runtime/library";
 import { Contact } from "../../shared/types";
-import { WAMessage, WAMessageKey } from "@whiskeysockets/baileys";
+import { WAMessage } from "@whiskeysockets/baileys";
+import { MessageMapper } from "../../infra/mappers/messageMapper";
+import { ContactMapper } from "../../infra/mappers/contactMapper";
 
 export default class PrismaConnection {
 
@@ -116,14 +118,20 @@ export default class PrismaConnection {
         return await Promise.all(allData?.map(async (data) => data.content));
     }
 
-    static async getMessageById(messageId: string): Promise<JsonValue | undefined> {
+    static async getMessageById(messageId: string): Promise<WAMessage | undefined> {
         const allData = await PrismaConnection.conn.message.findFirst({
             where: { messageId }
         });
-        return allData?.content;
+
+        if(!allData){
+            return undefined;
+        }
+
+        return MessageMapper.toWAMessage(allData);
+
     }
     
-    static async getLastMessageByInstance(instance: string, remoteJid: string): Promise<JsonValue | undefined> {
+    static async getLastMessageByInstance(instance: string, remoteJid: string): Promise<WAMessage | undefined> {
         const allData = await PrismaConnection.conn.message.findFirst({
             where: { 
                 AND: [
@@ -133,6 +141,33 @@ export default class PrismaConnection {
             },
             orderBy: { messageTimestamp: "desc" },
         });
-        return allData?.content;
+
+        if(!allData){
+            return undefined;
+        }
+
+        return MessageMapper.toWAMessage(allData);
+
     }
+    
+    static async getContactById(instance: string, id: string): Promise<Contact | undefined> {
+        const allData = await PrismaConnection.conn.contact.findFirst({
+            where: { 
+                instance,
+                OR: [
+                    { jid: id },
+                    { lid: id }
+                ]
+            }
+        });
+
+        if(!allData){
+            return undefined;
+        }
+
+        return ContactMapper.toContact(allData);
+
+    }
+    
+
 }
