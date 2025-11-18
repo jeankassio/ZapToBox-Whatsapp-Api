@@ -36,7 +36,10 @@ export default class MediaController {
 
             if(!isMediaMessage){
                 console.error("Message is not a media message.");
-                return;
+                return {
+                    success: false,
+                    error: "Message is not a media message.",
+                };
             }
 
             const buffer = await downloadMediaMessage(msg, "buffer", {}, {logger: this.sock?.logger, reuploadRequest: this.sock?.updateMediaMessage!});
@@ -62,7 +65,10 @@ export default class MediaController {
 
         }catch(err){
             console.error("Error fetching media message:", err);
-            return;
+            return {
+                success: false,
+                error: "Error fetching media message.",
+            };
         }
 
     }

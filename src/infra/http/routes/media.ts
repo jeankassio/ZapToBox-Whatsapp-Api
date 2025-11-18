@@ -8,12 +8,19 @@ export default class MediaRoutes{
     get(){
         
         this.router
-            .post("/download", async (req: Request, res: Response) => {
+            .post("/download/:owner/:instanceName", async (req: Request, res: Response) => {
 
-                const { owner, instanceName, messageId, isBase64} = req.body;
+                const owner = req.params.owner;
+                const instanceName = req.params.instanceName;
+
+                if(!owner || !instanceName){
+                    return res.status(400).json({ error: "Owner and instanceName are required." });
+                }
+
+                const { messageId, isBase64} = req.body;
 
                 if(!owner || !instanceName || !messageId){
-                    return res.status(400).json({ error: "Fields 'owner', 'instanceName', 'messageId' is required." });
+                    return res.status(400).json({ error: "Field 'messageId' is required." });
                 }
 
                 const mediaController = new MediaController(owner, instanceName);

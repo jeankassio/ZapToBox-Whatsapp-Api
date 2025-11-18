@@ -1,6 +1,7 @@
 import { Prisma, PrismaClient } from "@prisma/client";
 import { JsonValue } from "@prisma/client/runtime/library";
 import { Contact } from "../../shared/types";
+import { WAMessage, WAMessageKey } from "@whiskeysockets/baileys";
 
 export default class PrismaConnection {
 
@@ -9,8 +10,8 @@ export default class PrismaConnection {
     static async saveMessages(instance: string, msg: any): Promise<any> {
 
         const key = msg.key;
-
-        if(!key || !key.id) return;{
+        
+        if(!key || !key.id){
             return;
         }
 
@@ -24,18 +25,18 @@ export default class PrismaConnection {
             update: {
                 content: msg,
                 pushName: msg.pushName || null,
-                status: msg.status || null,
+                status: msg?.status || null,
                 messageTimestamp: BigInt(msg.messageTimestamp || 0),
             },
             create: {
                 instance,
                 messageId: key.id,
-                remoteJid: key.remoteJid,
-                senderLid: key.senderLid || null,
+                remoteJid: key.remoteJid!,
+                senderLid: key?.senderLid || null,
                 fromMe: !!key.fromMe,
                 pushName: msg.pushName || null,
                 content: msg,
-                status: msg.status.toString || null,
+                status: msg?.status?.toString || null,
                 messageTimestamp: BigInt(msg.messageTimestamp || 0),
             },
         });
@@ -118,6 +119,19 @@ export default class PrismaConnection {
     static async getMessageById(messageId: string): Promise<JsonValue | undefined> {
         const allData = await PrismaConnection.conn.message.findFirst({
             where: { messageId }
+        });
+        return allData?.content;
+    }
+    
+    static async getLastMessageByInstance(instance: string, remoteJid: string): Promise<JsonValue | undefined> {
+        const allData = await PrismaConnection.conn.message.findFirst({
+            where: { 
+                AND: [
+                    { instance },
+                    { remoteJid }
+                ]
+            },
+            orderBy: { messageTimestamp: "desc" },
         });
         return allData?.content;
     }

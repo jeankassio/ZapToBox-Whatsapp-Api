@@ -1,20 +1,25 @@
-/*
-  Warnings:
+-- CreateTable
+CREATE TABLE "Message" (
+    "id" SERIAL NOT NULL,
+    "instance" TEXT NOT NULL,
+    "messageId" TEXT NOT NULL,
+    "remoteJid" TEXT NOT NULL,
+    "senderLid" TEXT,
+    "fromMe" BOOLEAN NOT NULL,
+    "pushName" TEXT,
+    "content" JSONB NOT NULL,
+    "status" TEXT,
+    "messageTimestamp" BIGINT NOT NULL,
 
-  - You are about to drop the column `createdAt` on the `Message` table. All the data in the column will be lost.
-  - You are about to drop the column `updatedAt` on the `Message` table. All the data in the column will be lost.
-
-*/
--- AlterTable
-ALTER TABLE "Message" DROP COLUMN "createdAt",
-DROP COLUMN "updatedAt";
+    CONSTRAINT "Message_pkey" PRIMARY KEY ("id")
+);
 
 -- CreateTable
 CREATE TABLE "Contact" (
     "id" SERIAL NOT NULL,
     "instance" TEXT NOT NULL,
-    "name" TEXT NOT NULL,
-    "jid" TEXT NOT NULL,
+    "name" TEXT,
+    "jid" TEXT,
     "lid" TEXT,
 
     CONSTRAINT "Contact_pkey" PRIMARY KEY ("id")
@@ -31,6 +36,15 @@ CREATE TABLE "Chat" (
 );
 
 -- CreateIndex
+CREATE INDEX "Message_instance_idx" ON "Message"("instance");
+
+-- CreateIndex
+CREATE INDEX "Message_remoteJid_idx" ON "Message"("remoteJid");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "Message_instance_messageId_key" ON "Message"("instance", "messageId");
+
+-- CreateIndex
 CREATE INDEX "Contact_instance_idx" ON "Contact"("instance");
 
 -- CreateIndex
@@ -44,6 +58,3 @@ CREATE INDEX "Chat_instance_idx" ON "Chat"("instance");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "Chat_instance_jid_key" ON "Chat"("instance", "jid");
-
--- CreateIndex
-CREATE INDEX "Message_remoteJid_idx" ON "Message"("remoteJid");

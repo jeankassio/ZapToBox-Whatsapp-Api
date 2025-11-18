@@ -1,24 +1,19 @@
-import { Request, Response } from "express";
 import Instance from "../../baileys/services";
 import InstancesRepository from "../../../core/repositories/instances";
 import { instances } from "../../../shared/constants";
 
 export default class InstancesController {
 
-    async create(req: Request, res: Response) {
+    async create(owner: string, instanceName: string) {
         try {
-            const { owner, instanceName } = req.body;
-
-            if (!owner || !instanceName) {
-                return res.status(400).json({ error: "Fields 'owner' and 'instanceName' is required" });
-            }
+            
 
             const key = `${owner}_${instanceName}`;
             instances[key] = new Instance;
 
             const instance = await instances[key].create({ owner, instanceName });
 
-            return res.json({
+            return {
                 success: true,
                 message: "Instance Created with Successfully!",
                 instance: {
@@ -26,35 +21,33 @@ export default class InstancesController {
                     instanceName: instance.instanceName,
                     connectionStatus: instance.connectionStatus,
                     profilePictureUrl: instance.profilePictureUrl || null,
-                },
-            });
+                }
+            };
         } catch (err: any) {
             console.error("Error in Instance Creator", err);
-            return res.status(500).json({
+            return {
                 success: false,
                 error: "Internal Error in Instance Creator.",
                 details: err.message,
-            });
+            };
         }
     }
 
-    async get(req: Request, res: Response){
+    async get(owner: string | undefined) {
 
         try{
 
-            const owner = req.query?.owner?.toString().trim();
-
-            res.json({
+            return {
                 success: true,
                 data: (new InstancesRepository).list(owner)
-            });
+            };
 
         }catch(err: any){
             console.error("Error in List Instances:", err);
-            return res.status(500).json({
+            return {
                 success: false,
-                details: err.message,
-            });
+                error: err.message,
+            };
         }
 
     }

@@ -1,6 +1,6 @@
 import { instances } from "../../../shared/constants";
 import { StatusPresence } from "../../../shared/types";
-import { AnyMessageContent, delay, WASocket } from "@whiskeysockets/baileys";
+import { AnyMessageContent, delay, WAMessage, WAMessageKey, WASocket } from "@whiskeysockets/baileys";
 
 export default class MessagesController {
 
@@ -25,6 +25,10 @@ export default class MessagesController {
 
         return this.sock?.sendMessage(this.jid, options);
 
+    }
+
+    async readMessage(messageId: WAMessageKey){
+        return this.sock?.readMessages([messageId]);    
     }
 
     formatJid(jid: string){
