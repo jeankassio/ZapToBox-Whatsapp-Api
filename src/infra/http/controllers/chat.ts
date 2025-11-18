@@ -112,8 +112,37 @@ export default class ChatController {
                 success: false,
                 error: "Failed to change chat mute status.",
             };
+
+        }
+    }
+
+    async markChatAsRead(remoteJid: string, markRead: boolean){
+
+        if(!this.sock){
+            return {
+                success: false,
+                error: "Instance not connected.",
+            };
+        }
+
+        try{
+
+            await this.sock.chatModify({ markRead, lastMessages: [] }, remoteJid);
+
+            return {
+                success: true,
+                message: "Chat marked as read successfully.",
+            };
+
+        }catch(err){
+
+            return {
+                success: false,
+                error: "Failed to mark chat as read.",
+            };
             
         }
+    
     }
 
 }

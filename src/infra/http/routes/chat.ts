@@ -112,10 +112,39 @@ export default class ChatRoutes{
                          error: "jid, mute and until are required"
                     });
                 }
-                
+
                 const chatController = new ChatController(owner, instanceName);
                 const result = await chatController.muteChat(remoteJid, mute);
 
+                if(result?.error){
+                    return res.status(500).json(result);
+                }else{
+                    return res.status(200).json(result);
+                }
+
+            })
+            .post("/markChatAsRead/:owner/:instanceName", async (req: Request, res: Response) => {
+
+                const owner = req.params.owner;
+                const instanceName = req.params.instanceName;
+                
+                if(!owner || !instanceName){
+                    return res.status(400).json({
+                         error: "Owner and instanceName are required"
+                    });
+                }
+
+                const { remoteJid, markAsRead } = req.body;
+
+                if(!remoteJid){
+                    return res.status(400).json({
+                         error: "remoteJid is required"
+                    });
+                }
+
+                const chatController = new ChatController(owner, instanceName);
+                const result = await chatController.markChatAsRead(remoteJid, markAsRead);
+                
                 if(result?.error){
                     return res.status(500).json(result);
                 }else{

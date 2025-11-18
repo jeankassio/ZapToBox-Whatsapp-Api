@@ -25,11 +25,13 @@ export default class MessageRoutes{
                 }
 
                 const messagesController = new MessagesController(owner, instanceName, jid, delay || 0);
-                messagesController.sendMessage(messageOptions);
-                return res.json({
-                     success: true, 
-                     message: "Message Sent Successfully!" 
-                });
+                const result = await messagesController.sendMessage(messageOptions);
+                
+                if(result?.error){
+                    return res.status(500).json(result);
+                }else{
+                    return res.status(200).json(result);
+                }
 
             })
             .post("/readMessage/:owner/:instanceName", async (req: Request, res: Response) => {
@@ -52,12 +54,39 @@ export default class MessageRoutes{
 
                 const messagesController = new MessagesController(owner, instanceName, remoteJid, 0);
 
-                await messagesController.readMessage(key);
+                const result = await messagesController.readMessage(key);
 
-                return res.json({
-                     success: true, 
-                     message: "Message Read Successfully!" 
-                });
+                if(result?.error){
+                    return res.status(500).json(result);
+                }else{
+                    return res.status(200).json(result);
+                }
+
+            })
+            .post("/deleteMessage/:owner/:instanceName", async (req: Request, res: Response) => {
+
+                const owner = req.params.owner;
+                const instanceName = req.params.instanceName
+                
+                if(!owner || !instanceName){
+                    return res.status(400).json({ error: "Owner and instanceName are required." });
+                }
+
+                const { messageId, remoteJid, forEveryone } = req.body;
+
+                const key: WAMessageKey = {
+                    id: messageId,
+                    remoteJid: remoteJid
+                };
+
+                const messagesController = new MessagesController(owner, instanceName, remoteJid, 0);
+                const result = await messagesController.deleteMessage(key, forEveryone || false);
+
+                if(result?.error){
+                    return res.status(500).json(result);
+                }else{
+                    return res.status(200).json(result);
+                }
 
             })
         return this.router;

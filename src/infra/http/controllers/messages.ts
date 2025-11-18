@@ -17,18 +17,85 @@ export default class MessagesController {
 
     async sendMessage(options: AnyMessageContent){
         
-        const text = ("text" in options) ? options.text : ("caption" in options) ? options.caption : "";
+        try{
 
-        const presence: StatusPresence = ("audio" in options ? "recording" : "composing");
-        
-        await this.simulateTyping(presence, text);
+            const text = ("text" in options) ? options.text : ("caption" in options) ? options.caption : "";
 
-        return this.sock?.sendMessage(this.jid, options);
+            const presence: StatusPresence = ("audio" in options ? "recording" : "composing");
+            
+            await this.simulateTyping(presence, text);
+
+            this.sock?.sendMessage(this.jid, options);
+
+            return {
+                success: true,
+                message: "Message sent successfully.",
+            };
+
+        }catch(err){
+
+            return {
+                success: false,
+                error: "Failed to send message.",
+            };
+
+        }
 
     }
 
+    async deleteMessage(key: WAMessageKey, forEveryone: boolean){
+
+        try{
+        
+            if(forEveryone){
+                await this.sock?.sendMessage(this.jid, { delete: key });
+            }else{
+                await this.sock?.chatModify(
+                    {
+                        deleteForMe: {
+                            deleteMedia: true,
+                            key: key,
+                            timestamp: Date.now() / 1000
+                        }
+                    }, 
+                    this.jid
+                )
+            }
+
+            return {
+                success: true,
+                message: "Message deleted successfully.",
+            };
+
+        }catch(err){
+
+            return {
+                success: false,
+                error: "Failed to delete message.",
+            };
+        }
+
+    }
     async readMessage(messageId: WAMessageKey){
-        return this.sock?.readMessages([messageId]);    
+
+        try{
+
+            await this.sock?.readMessages([messageId]);
+
+            return {
+                success: true,
+                message: "Message marked as read successfully.",
+            };
+
+        }catch(err){
+
+            return {
+                success: false,
+                error: "Failed to mark message as read.",
+            };
+
+        }
+
     }
 
     formatJid(jid: string){
