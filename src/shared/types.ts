@@ -27,7 +27,7 @@ export interface ProxyAgent{
 }
 
 export interface Contact{
-  jid?: string;
+  id?: string;
   name?: string;
   lid?: string;
 }

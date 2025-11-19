@@ -208,17 +208,12 @@ export default class Instance{
         });
 
         this.sock.ev.on("contacts.upsert", async (contacts: BaileysEventMap['contacts.upsert']) => {
-
-            if(typeof contacts === 'object' && !Array.isArray(contacts)){
-                PrismaConnection.saveContact(`${this.instance.owner}_${this.instance.instanceName}`, contacts);
-            }else{
-                PrismaConnection.saveManyContacts(`${this.instance.owner}_${this.instance.instanceName}`, contacts);
-            }
-
+            PrismaConnection.saveManyContacts(`${this.instance.owner}_${this.instance.instanceName}`, contacts);
             await trySendWebhook("contacts.upsert", this.instance, [contacts]);
         });
 
         this.sock.ev.on("contacts.update", async (contacts: BaileysEventMap['contacts.update']) => {
+            PrismaConnection.saveManyContacts(`${this.instance.owner}_${this.instance.instanceName}`, contacts);
             await trySendWebhook("contacts.update", this.instance, [contacts]);
         });
 

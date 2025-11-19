@@ -54,23 +54,23 @@ export default class PrismaConnection {
     }
 
     static async saveContact(instance: string, contact: Contact): Promise<any> {
-        const { jid, lid, name } = contact;
+        const { id, lid, name } = contact;
 
-        if (!jid && !lid) return;
+        if (!id && !lid) return;
 
         try{
 
             const data = {
                 instance,
                 name: name ?? null,
-                jid: jid ?? null,
+                jid: id ?? null,
                 lid: lid ?? null,
             };
 
-            if(jid){
+            if(id){
                 return await PrismaConnection.conn.contact.upsert({
                     where: {
-                        instance_jid: { instance, jid }
+                        instance_jid: { instance, jid: id }
                     },
                     update: data,
                     create: data
