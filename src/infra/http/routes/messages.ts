@@ -34,7 +34,7 @@ export default class MessageRoutes{
                 }
 
             })
-            .post("/readMessage/:owner/:instanceName", async (req: Request, res: Response) => {
+            .patch("/readMessage/:owner/:instanceName", async (req: Request, res: Response) => {
 
                 const owner = req.params.owner;
                 const instanceName = req.params.instanceName;
@@ -63,7 +63,7 @@ export default class MessageRoutes{
                 }
 
             })
-            .post("/deleteMessage/:owner/:instanceName", async (req: Request, res: Response) => {
+            .delete("/deleteMessage/:owner/:instanceName", async (req: Request, res: Response) => {
 
                 const owner = req.params.owner;
                 const instanceName = req.params.instanceName
@@ -93,7 +93,7 @@ export default class MessageRoutes{
                 }
 
             })
-            .post("/unstar/:owner/:instanceName", async (req: Request, res: Response) => {
+            .patch("/unstar/:owner/:instanceName", async (req: Request, res: Response) => {
 
                 const owner = req.params.owner;
                 const instanceName = req.params.instanceName

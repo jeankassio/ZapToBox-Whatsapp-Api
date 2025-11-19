@@ -133,7 +133,7 @@ export default class ProfileRoutes{
                 }
 
             })
-            .post("/profileName/:owner/:instanceName", async(req: Request, res: Response) => {
+            .patch("/profileName/:owner/:instanceName", async(req: Request, res: Response) => {
 
                 const owner = req.params.owner;
                 const instanceName = req.params.instanceName;
@@ -158,7 +158,7 @@ export default class ProfileRoutes{
                 }
 
             })
-            .post("/profileStatus/:owner/:instanceName", async(req: Request, res: Response) => {
+            .patch("/profileStatus/:owner/:instanceName", async(req: Request, res: Response) => {
 
                 const owner = req.params.owner;
                 const instanceName = req.params.instanceName;
@@ -183,7 +183,7 @@ export default class ProfileRoutes{
                 }
 
             })
-            .post("/profilePicture/:owner/:instanceName", async(req: Request, res: Response) => {
+            .put("/profilePicture/:owner/:instanceName", async(req: Request, res: Response) => {
 
                 const owner = req.params.owner;
                 const instanceName = req.params.instanceName;

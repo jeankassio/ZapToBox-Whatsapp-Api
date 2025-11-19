@@ -8,7 +8,7 @@ export default class ChatRoutes{
     get(){
         
         this.router
-            .post("/rejectCall/:owner/:instanceName", async (req: Request, res: Response) => {
+            .patch("/rejectCall/:owner/:instanceName", async (req: Request, res: Response) => {
 
                 const owner = req.params.owner;
                 const instanceName = req.params.instanceName;
@@ -65,7 +65,7 @@ export default class ChatRoutes{
                     return res.status(200).json(result);
                 }
             })
-            .post("/archiveChat/:owner/:instanceName", async (req: Request, res: Response) => {
+            .patch("/archiveChat/:owner/:instanceName", async (req: Request, res: Response) => {
 
                 const owner = req.params.owner;
                 const instanceName = req.params.instanceName;
@@ -94,7 +94,7 @@ export default class ChatRoutes{
                 }
 
             })
-            .post("muteChat/:owner/:instanceName", async (req: Request, res: Response) => {
+            .patch("/mute/:owner/:instanceName", async (req: Request, res: Response) => {
 
                 const owner = req.params.owner;
                 const instanceName = req.params.instanceName
@@ -109,7 +109,7 @@ export default class ChatRoutes{
                 
                 if(!remoteJid || !mute){
                     return res.status(400).json({
-                         error: "jid, mute and until are required"
+                         error: "Parameters jid and mute are required"
                     });
                 }
 
@@ -123,7 +123,7 @@ export default class ChatRoutes{
                 }
 
             })
-            .post("/markChatAsRead/:owner/:instanceName", async (req: Request, res: Response) => {
+            .patch("/markChatAsRead/:owner/:instanceName", async (req: Request, res: Response) => {
 
                 const owner = req.params.owner;
                 const instanceName = req.params.instanceName;
@@ -152,7 +152,7 @@ export default class ChatRoutes{
                 }
 
             })
-            .post("/deleteChat/:owner/:instanceName", async(req: Request, res: Response) => {
+            .delete("/deleteChat/:owner/:instanceName", async(req: Request, res: Response) => {
 
                 const owner = req.params.owner;
                 const instanceName = req.params.instanceName;
@@ -181,7 +181,7 @@ export default class ChatRoutes{
                 }
 
             })
-            .post("/unpin/:owner/:instanceName", async(req: Request, res: Response) => {
+            .patch("/unpin/:owner/:instanceName", async(req: Request, res: Response) => {
 
                 const owner = req.params.owner;
                 const instanceName = req.params.instanceName;
