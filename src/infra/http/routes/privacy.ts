@@ -8,7 +8,7 @@ export default class PrivacyRoutes{
     get(){
         
         this.router
-            .patch("/onWhatsapp/:owner/:instanceName", async (req: Request, res: Response) => {
+            .patch("/unblock/:owner/:instanceName", async (req: Request, res: Response) => {
 
                 const owner = req.params.owner;
                 const instanceName = req.params.instanceName;
