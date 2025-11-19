@@ -89,10 +89,9 @@ export default class InstancesController {
         try{
 
             const key = `${owner}_${instanceName}`;
+            const instanceRemove = instances[key];
 
-            await clearInstanceWebhooks(key);
-            const instancePath = path.join(sessionsPath, owner, instanceName);
-            await removeInstancePath(instancePath);
+            instanceRemove?.clearInstance();
 
             return {
                 success: true,
