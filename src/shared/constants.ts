@@ -11,8 +11,6 @@ export const instanceConnection: Record<string, InstanceData> = {};
 export const instanceStatus = new Map<string, ConnectionStatus>();
 export const instances: Record<string, Instance> = {};
 
-export const qrCodeLimit: number = UserConfig.qrCodeLimit;
-
 export const baileysEvents = [
     "creds.update",
     "connection.update",

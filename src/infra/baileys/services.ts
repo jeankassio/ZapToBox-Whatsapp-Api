@@ -16,7 +16,7 @@ import QRCode from "qrcode";
 import { release } from "os";
 import NodeCache from "node-cache"
 import P from "pino";
-import { baileysEvents, instanceConnection, instanceStatus, qrCodeLimit, sessionsPath } from "../../shared/constants";
+import { baileysEvents, instanceConnection, instanceStatus, sessionsPath } from "../../shared/constants";
 import { clearInstanceWebhooks, genProxy, removeInstancePath, trySendWebhook } from "../../shared/utils";
 import { ConnectionStatus, InstanceData } from "../../shared/types";
 import UserConfig from "../config/env";
@@ -74,7 +74,7 @@ export default class Instance{
             markOnlineOnConnect: false,
             cachedGroupMetadata: async (jid) => groupCache.get(jid),
             getMessage: async (key) => await PrismaConnection.getMessageById(key.id!) as proto.IMessage,
-            qrTimeout: 30 * 1000
+            qrTimeout: UserConfig.qrCodeTimeout * 1000
         });
 
         this.key = `${this.owner}_${this.instanceName}`;
@@ -109,11 +109,11 @@ export default class Instance{
 
                 this.qrCodeCount++;
 
-                if(this.qrCodeCount > qrCodeLimit){
+                if(this.qrCodeCount > UserConfig.qrCodeLimit){
 
                     console.log(`[${this.owner}/${this.instanceName}] QRCODE LIMIT REACHED`);
 
-                    await trySendWebhook("qrcode.limit", this.instance, [{ qrCodeLimit }]);
+                    await trySendWebhook("qrcode.limit", this.instance, [{ qrCodeLimit: UserConfig.qrCodeLimit }]);
 
                     await this.clearInstance();
 
@@ -138,7 +138,7 @@ export default class Instance{
                 const ppUrl = await this.getProfilePicture();
                 this.instance.profilePictureUrl = ppUrl;
                 
-                console.log(`[${this.owner}/${this.instanceName}] Session Opened`);
+                console.log(`[${this.owner}/${this.instanceName}] Connected to Whatsapp`);
                 
                 this.sock.sendPresenceUpdate('unavailable');
 
