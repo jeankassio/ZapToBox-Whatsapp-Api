@@ -13,7 +13,7 @@ export async function removeInstancePath(instancePath: string){
 
 }
 
-export function genProxy(wppProxy?: string): ProxyAgent{
+export async function genProxy(wppProxy?: string): Promise<ProxyAgent>{
 
     const proxys: ProxyAgent = {};
 

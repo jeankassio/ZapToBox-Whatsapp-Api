@@ -56,7 +56,7 @@ export default class Instance{
         const { version } = await fetchLatestBaileysVersion();
 
         const browser: WABrowserDescription  = [UserConfig.sessionClient, UserConfig.sessionName, release()];
-        const agents = genProxy(UserConfig.proxyUrl);
+        const agents = await genProxy(UserConfig.proxyUrl);
 
         this.sock = makeWASocket({
             browser,
@@ -74,6 +74,7 @@ export default class Instance{
             markOnlineOnConnect: false,
             cachedGroupMetadata: async (jid) => groupCache.get(jid),
             getMessage: async (key) => await PrismaConnection.getMessageById(key.id!) as proto.IMessage,
+            qrTimeout: 30 * 1000
         });
 
         this.key = `${this.owner}_${this.instanceName}`;
