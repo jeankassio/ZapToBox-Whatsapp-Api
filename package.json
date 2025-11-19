@@ -11,7 +11,7 @@
   },
   "keywords": [],
   "author": "Jean Kássio",
-  "license": "ISC",
+  "license": "MIT",
   "type": "commonjs",
   "dependencies": {
     "@prisma/client": "^6.19.0",
@@ -32,7 +32,7 @@
   "devDependencies": {
     "@types/express": "^5.0.5",
     "@types/jsonwebtoken": "^9.0.10",
-    "@types/node": "^24.10.0",
+    "@types/node": "^24.10.1",
     "@types/qrcode": "^1.5.6",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.9.3"
