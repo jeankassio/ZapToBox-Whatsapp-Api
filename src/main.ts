@@ -7,6 +7,9 @@ import Sessions from "./infra/state/sessions";
 import Queue from "./infra/webhook/queue";
 import MediaRoutes from "./infra/http/routes/media";
 import ChatRoutes from "./infra/http/routes/chat";
+import GroupRoutes from "./infra/http/routes/group";
+import ProfileRoutes from "./infra/http/routes/profile";
+import PrivacyRoutes from "./infra/http/routes/privacy";
 
 async function bootstrap(){
 
@@ -21,6 +24,9 @@ async function bootstrap(){
     app.use("/messages/", (new MessageRoutes).get());
     app.use("/media/", (new MediaRoutes).get());
     app.use("/chat/", (new ChatRoutes).get());
+    app.use("/group/", (new GroupRoutes).get());
+    app.use("/profile/", (new ProfileRoutes).get());
+    app.use("/privacy/", (new PrivacyRoutes).get());
 
     app.listen(UserConfig.portConfig, async () => {
         await (new Sessions).start();
