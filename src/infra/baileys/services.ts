@@ -16,7 +16,7 @@ import QRCode from "qrcode";
 import { release } from "os";
 import NodeCache from "node-cache"
 import P from "pino";
-import { instanceConnection, instanceStatus, qrCodeLimit, sessionsPath } from "../../shared/constants";
+import { baileysEvents, instanceConnection, instanceStatus, qrCodeLimit, sessionsPath } from "../../shared/constants";
 import { clearInstanceWebhooks, genProxy, removeInstancePath, trySendWebhook } from "../../shared/utils";
 import { ConnectionStatus, InstanceData } from "../../shared/types";
 import UserConfig from "../config/env";
@@ -109,7 +109,7 @@ export default class Instance{
 
                 this.qrCodeCount++;
 
-                if(this.qrCodeCount >= qrCodeLimit){
+                if(this.qrCodeCount > qrCodeLimit){
 
                     console.log(`[${this.owner}/${this.instanceName}] QRCODE LIMIT REACHED`);
 
@@ -165,14 +165,6 @@ export default class Instance{
                     await trySendWebhook("connection.removed", this.instance, [{ reason }]);
                     
                     await this.clearInstance();
-
-                    this.sock?.ev.removeAllListeners('connection.update');
-                    this.sock?.ev.removeAllListeners('messages.upsert');
-                    this.sock?.ev.removeAllListeners('messages.update');
-                    this.sock?.ev.removeAllListeners('messaging-history.set');
-                    this.sock?.ev.removeAllListeners('contacts.upsert');
-                    this.sock?.ev.removeAllListeners('chats.upsert');
-                    this.sock?.ev.removeAllListeners('creds.update');
 
                 }
             }
@@ -357,6 +349,12 @@ export default class Instance{
         PrismaConnection.deleteByInstance(`${this.owner}_${this.instanceName}`);
 
         delete instanceConnection[this.key];
+
+        for(const event of baileysEvents){
+            this.sock?.ev.removeAllListeners(event);
+        }
+
+        await this.sock?.ws?.close?.();
 
     }
 
