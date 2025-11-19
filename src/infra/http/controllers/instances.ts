@@ -112,10 +112,12 @@ export default class InstancesController {
     async get(owner: string | undefined) {
 
         try{
+            
+            const repo = await (new InstancesRepository).list(owner);
 
             return {
                 success: true,
-                data: (new InstancesRepository).list(owner)
+                data: repo
             };
 
         }catch(err: any){

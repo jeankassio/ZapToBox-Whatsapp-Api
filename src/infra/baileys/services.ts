@@ -223,12 +223,13 @@ export default class Instance{
         });
 
         this.sock.ev.on("messages.upsert", async (messages: BaileysEventMap['messages.upsert']) => {
+            this.sock.sendPresenceUpdate('unavailable');
             PrismaConnection.saveMessages(`${this.instance.owner}_${this.instance.instanceName}`, messages.messages);
             await trySendWebhook("messages.upsert", this.instance, [messages]);
         });
 
         this.sock.ev.on("messages.update", async (updates: BaileysEventMap['messages.update']) => {
-
+            
             const nupdates = await Promise.all(
                 updates.map(async (message) => {
                     const { key, update } = message;
