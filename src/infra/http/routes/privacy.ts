@@ -19,7 +19,7 @@ export default class PrivacyRoutes{
 
                 const { remoteJid, block } = req.body;
 
-                if(!remoteJid || !block){
+                if(!remoteJid || typeof block === 'undefined'){
                     return res.status(400).json({ error: "Fields 'remoteJid' and 'block' is required." });
                 }
 

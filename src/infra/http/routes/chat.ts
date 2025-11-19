@@ -78,7 +78,7 @@ export default class ChatRoutes{
 
                 const { remoteJid, archive } = req.body;
 
-                if(!remoteJid || !archive){
+                if(!remoteJid || typeof archive === 'undefined'){
                     return res.status(400).json({
                          error: "jid and archive are required"
                     });
@@ -107,7 +107,7 @@ export default class ChatRoutes{
 
                 const { remoteJid, mute } = req.body;
                 
-                if(!remoteJid || !mute){
+                if(!remoteJid || typeof mute === 'undefined'){
                     return res.status(400).json({
                          error: "Parameters jid and mute are required"
                     });
@@ -136,10 +136,8 @@ export default class ChatRoutes{
 
                 const { remoteJid, markAsRead } = req.body;
 
-                if(!remoteJid){
-                    return res.status(400).json({
-                         error: "remoteJid is required"
-                    });
+                if(!remoteJid || typeof markAsRead === 'undefined'){
+                    return res.status(400).json({error: "remoteJid is required"});
                 }
 
                 const chatController = new ChatController(owner, instanceName);
@@ -194,7 +192,7 @@ export default class ChatRoutes{
 
                 const {remoteJid, pin} = req.body;
 
-                if(!remoteJid || !pin){
+                if(!remoteJid || typeof pin === 'undefined'){
                     return res.status(400).json({
                          error: "messageId and pin is required"
                     });

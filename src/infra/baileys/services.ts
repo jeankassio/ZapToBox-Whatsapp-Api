@@ -150,7 +150,7 @@ export default class Instance{
                     
                     this.setStatus("REMOVED");
 
-                    await clearInstanceWebhooks(this.instanceName);
+                    await clearInstanceWebhooks(`${this.owner}_${this.instanceName}`);
                     removeInstancePath(this.instancePath);
                     
                     PrismaConnection.deleteByInstance(`${this.owner}_${this.instanceName}`);

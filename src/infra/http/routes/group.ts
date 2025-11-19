@@ -20,7 +20,7 @@ export default class GroupRoutes{
 
                 const { groupName, participants } = req.body;
 
-                if(!groupName || !groupName){
+                if(!groupName || !participants){
                     return res.status(400).json({ error: "Field 'id' is required." });
                 }else if(!Array.isArray(participants) || participants.length < 2){
                     return res.status(400).json({ error: "Minimum of 2 participants required." });
@@ -399,7 +399,7 @@ export default class GroupRoutes{
 
                 const { groupJid, time } = req.body;
 
-                if(!groupJid || !time){
+                if(!groupJid || typeof time === 'undefined'){
                     return res.status(400).json({ error: "Fields 'groupJid' and 'time' is required." });
                 }else if(!['0', '24h', '7d', '90d'].includes(time)){
                     return res.status(400).json({ error: "Invalid action value" });
@@ -446,7 +446,7 @@ export default class GroupRoutes{
 
                 const { groupJid, onlyAdmin } = req.body;
 
-                if(!groupJid || !onlyAdmin){
+                if(!groupJid || typeof onlyAdmin === 'undefined'){
                     return res.status(400).json({ error: "Fields 'groupJid' and 'onlyAdmin' is required." });
                 }
 

@@ -39,7 +39,43 @@ export default class InstanceRoutes{
                     return res.status(200).json(result);
                 }
 
-            });
+            })
+            .get("/connect/:owner/:instanceName", async (req: Request, res: Response) => {
+
+                const owner = req.params.owner;
+                const instanceName = req.params.instanceName;
+                
+                if (!owner || !instanceName) {
+                    return res.status(400).json({ error: "Fields 'owner' and 'instanceName' is required" });
+                }
+
+                const result = await instancesController.connect(owner, instanceName);
+
+                if(result?.error){
+                    return res.status(500).json(result);
+                }else{
+                    return res.status(200).json(result);
+                }
+
+            })
+            .delete("/delete/:owner/:instanceName", async (req: Request, res: Response) => {
+
+                const owner = req.params.owner;
+                const instanceName = req.params.instanceName;
+                
+                if (!owner || !instanceName) {
+                    return res.status(400).json({ error: "Fields 'owner' and 'instanceName' is required" });
+                }
+
+                const result = await instancesController.delete(owner, instanceName);
+
+                if(result?.error){
+                    return res.status(500).json(result);
+                }else{
+                    return res.status(200).json(result);
+                }
+
+            })
 
         return this.router;
 
