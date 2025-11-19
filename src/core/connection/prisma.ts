@@ -56,8 +56,6 @@ export default class PrismaConnection {
     static async saveContact(instance: string, contact: Contact): Promise<any> {
         const { id, lid, name } = contact;
 
-        if (!id && !lid) return;
-
         try{
 
             const data = {
@@ -86,7 +84,7 @@ export default class PrismaConnection {
             }
 
         }catch(err){
-            console.error(err);
+            console.log(err);
             return false;
         }
 
