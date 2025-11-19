@@ -93,6 +93,8 @@ export default class InstancesController {
 
             instanceRemove?.clearInstance();
 
+            console.log(`[${owner}/${instanceName}] REMOVED`);
+
             return {
                 success: true,
                 message: "Instance removed with success"
