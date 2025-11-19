@@ -16,7 +16,7 @@ import QRCode from "qrcode";
 import { release } from "os";
 import NodeCache from "node-cache"
 import P from "pino";
-import { baileysEvents, instanceConnection, instanceStatus, sessionsPath } from "../../shared/constants";
+import { baileysEvents, instanceConnection, instances, instanceStatus, sessionsPath } from "../../shared/constants";
 import { clearInstanceWebhooks, genProxy, removeInstancePath, trySendWebhook } from "../../shared/utils";
 import { ConnectionStatus, InstanceData } from "../../shared/types";
 import UserConfig from "../config/env";
@@ -341,20 +341,27 @@ export default class Instance{
 
     async clearInstance(){
 
-        this.setStatus("REMOVED");
+        try{
 
-        await clearInstanceWebhooks(`${this.owner}_${this.instanceName}`);
-        await removeInstancePath(this.instancePath);
-                    
-        PrismaConnection.deleteByInstance(`${this.owner}_${this.instanceName}`);
+            this.setStatus("REMOVED");
 
-        delete instanceConnection[this.key];
+            await clearInstanceWebhooks(`${this.owner}_${this.instanceName}`);
+            await removeInstancePath(this.instancePath);
+                        
+            PrismaConnection.deleteByInstance(`${this.owner}_${this.instanceName}`);
 
-        for(const event of baileysEvents){
-            this.sock?.ev.removeAllListeners(event);
+            for(const event of baileysEvents){
+                this.sock?.ev.removeAllListeners(event);
+            }
+
+            await this.sock?.ws?.close?.();
+
+            delete instanceConnection[this.key];
+            delete instances[this.key];
+
+        }catch{
+            console.error("Error removing instance");
         }
-
-        await this.sock?.ws?.close?.();
 
     }
 
