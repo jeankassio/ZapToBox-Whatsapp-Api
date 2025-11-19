@@ -38,7 +38,7 @@ export default class PrismaConnection {
                 fromMe: !!key.fromMe,
                 pushName: msg.pushName || null,
                 content: msg,
-                status: msg?.status?.toString || null,
+                status: msg?.status?.toString() || null,
                 messageTimestamp: BigInt(msg.messageTimestamp || 0),
             },
         });
