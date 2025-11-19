@@ -344,6 +344,8 @@ export default class Instance{
 
         try{
 
+            await this.sock?.ws?.close?.();
+
             this.setStatus("REMOVED");
 
             await clearInstanceWebhooks(`${this.owner}_${this.instanceName}`);
@@ -354,8 +356,6 @@ export default class Instance{
             for(const event of baileysEvents){
                 this.sock?.ev.removeAllListeners(event);
             }
-
-            await this.sock?.ws?.close?.();
 
             delete instanceConnection[this.key];
             delete instances[this.key];
