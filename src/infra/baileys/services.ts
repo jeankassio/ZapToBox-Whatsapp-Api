@@ -16,7 +16,7 @@ import QRCode from "qrcode";
 import { release } from "os";
 import NodeCache from "node-cache"
 import P from "pino";
-import { instanceConnection, instanceStatus, sessionsPath } from "../../shared/constants";
+import { instanceConnection, instanceStatus, qrCodeLimit, sessionsPath } from "../../shared/constants";
 import { clearInstanceWebhooks, genProxy, removeInstancePath, trySendWebhook } from "../../shared/utils";
 import { ConnectionStatus, InstanceData } from "../../shared/types";
 import UserConfig from "../config/env";
@@ -34,6 +34,7 @@ export default class Instance{
     private instanceName!: string;
     private key!: string;
     private instancePath!: string;
+    private qrCodeCount!: number;
 
     getSock(): (WASocket | undefined){
         return this?.sock;
@@ -90,6 +91,8 @@ export default class Instance{
 
         this.instanceEvents(saveCreds);
 
+        this.qrCodeCount = 0;
+
         return this.instance;
 
     }
@@ -101,21 +104,33 @@ export default class Instance{
         this.sock.ev.on("connection.update", async (update: BaileysEventMap['connection.update']) => {
             const { connection, lastDisconnect, qr } = update;
 
-            if (qr) {
+            if(qr){
 
-                const qrBase64 = await QRCode.toDataURL(qr);
+                this.qrCodeCount++;
 
-                QRCode.toString(qr, { type: "utf8" }, (err, qrTerminal) => {
-                    if (!err){
-                        console.log(qrTerminal);
-                    }
-                });
-                
-                await trySendWebhook("qrcode", this.instance, [{ qrBase64 }]);
+                if(this.qrCodeCount >= qrCodeLimit){
 
-            }
+                    console.log(`[${this.owner}/${this.instanceName}] QRCODE LIMIT REACHED`);
 
-            if (connection === "open") {
+                    await trySendWebhook("qrcode.limit", this.instance, [{ qrCodeLimit }]);
+
+                    await this.clearInstance();
+
+                }else{
+
+                    const qrBase64 = await QRCode.toDataURL(qr);
+
+                    QRCode.toString(qr, { type: "utf8" }, (err, qrTerminal) => {
+                        if (!err){
+                            console.log(qrTerminal);
+                        }
+                    });
+                    
+                    await trySendWebhook("qrcode.updated", this.instance, [{ qrBase64 }]);
+
+                }
+
+            }else if (connection === "open"){
 
                 this.setStatus("ONLINE");
 
@@ -128,7 +143,7 @@ export default class Instance{
 
                 await trySendWebhook("connection.open", this.instance, [update]);
 
-            } else if (connection === "close") {
+            }else if(connection === "close"){
 
                 this.setStatus("OFFLINE");
 
@@ -148,14 +163,7 @@ export default class Instance{
 
                     await trySendWebhook("connection.removed", this.instance, [{ reason }]);
                     
-                    this.setStatus("REMOVED");
-
-                    await clearInstanceWebhooks(`${this.owner}_${this.instanceName}`);
-                    removeInstancePath(this.instancePath);
-                    
-                    PrismaConnection.deleteByInstance(`${this.owner}_${this.instanceName}`);
-
-                    delete instanceConnection[this.key];
+                    await this.clearInstance();
 
                     this.sock?.ev.removeAllListeners('connection.update');
                     this.sock?.ev.removeAllListeners('messages.upsert');
@@ -331,10 +339,23 @@ export default class Instance{
 
     }
 
-    setStatus(status: ConnectionStatus){
+    setStatus(status: ConnectionStatus): void{
 
         this.instance.connectionStatus = status;
         instanceStatus.set(this.key, status);
+
+    }
+
+    async clearInstance(){
+
+        this.setStatus("REMOVED");
+
+        await clearInstanceWebhooks(`${this.owner}_${this.instanceName}`);
+        await removeInstancePath(this.instancePath);
+                    
+        PrismaConnection.deleteByInstance(`${this.owner}_${this.instanceName}`);
+
+        delete instanceConnection[this.key];
 
     }
 

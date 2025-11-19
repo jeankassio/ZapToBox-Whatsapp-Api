@@ -12,5 +12,6 @@ export default class UserConfig{
     static proxyUrl: (string | undefined) = process.env.PROXY_URL;
     static webhook_queue_dir: string = process.env.WEBHOOK_QUEUE_DIR || "./webhook";
     static webhook_interval: number = (Number(process.env.QUEUE_INTERVAL) * 60 * 1000) || 5 * 60 * 1000;
-
+    static qrCodeLimit: number = Number(process.env.QRCODE_LIMIT || 5);
+    
 }
