@@ -4,7 +4,10 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "dev": "ts-node-dev --respawn --transpile-only src/main.ts"
+    "dev": "ts-node-dev --respawn --transpile-only src/main.ts",
+    "build": "tsc",
+    "start": "tsc && node dist/main.js",
+    "start:pm2": "pm2 start dist/main.js --name 'ZapToBox Whatsapp Api'"
   },
   "keywords": [],
   "author": "Jean Kássio",
