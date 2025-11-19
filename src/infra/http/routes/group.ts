@@ -1,6 +1,5 @@
 import express, { Request, Response } from "express";
 import GroupController from "../controllers/group";
-import { ParticipantAction } from "@whiskeysockets/baileys";
 
 
 export default class GroupRoutes{

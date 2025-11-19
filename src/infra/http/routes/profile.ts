@@ -23,8 +23,8 @@ export default class ProfileRoutes{
                     return res.status(400).json({ error: "Field 'id' is required." });
                 }
 
-                const mediaController = new ProfileController(owner, instanceName);
-                const result = await mediaController.onWhatsapp(id);
+                const profileController = new ProfileController(owner, instanceName);
+                const result = await profileController.onWhatsapp(id);
 
                 if(result?.error){
                     return res.status(500).json(result);
@@ -48,8 +48,8 @@ export default class ProfileRoutes{
                     return res.status(400).json({ error: "Field 'remoteJid' is required." });
                 }
 
-                const mediaController = new ProfileController(owner, instanceName);
-                const result = await mediaController.fetchStatus(remoteJid);
+                const profileController = new ProfileController(owner, instanceName);
+                const result = await profileController.fetchStatus(remoteJid);
 
                 if(result?.error){
                     return res.status(500).json(result);
@@ -73,8 +73,8 @@ export default class ProfileRoutes{
                     return res.status(400).json({ error: "Field 'remoteJid' is required." });
                 }
 
-                const mediaController = new ProfileController(owner, instanceName);
-                const result = await mediaController.fetchProfilePicture(remoteJid);
+                const profileController = new ProfileController(owner, instanceName);
+                const result = await profileController.fetchProfilePicture(remoteJid);
 
                 if(result?.error){
                     return res.status(500).json(result);
@@ -98,8 +98,8 @@ export default class ProfileRoutes{
                     return res.status(400).json({ error: "Field 'remoteJid' is required." });
                 }
 
-                const mediaController = new ProfileController(owner, instanceName);
-                const result = await mediaController.fetchBusinessProfile(remoteJid);
+                const profileController = new ProfileController(owner, instanceName);
+                const result = await profileController.fetchBusinessProfile(remoteJid);
 
                 if(result?.error){
                     return res.status(500).json(result);
@@ -123,8 +123,8 @@ export default class ProfileRoutes{
                     return res.status(400).json({ error: "Field 'remoteJid' is required." });
                 }
 
-                const mediaController = new ProfileController(owner, instanceName);
-                const result = await mediaController.presenceSubscribe(remoteJid);
+                const profileController = new ProfileController(owner, instanceName);
+                const result = await profileController.presenceSubscribe(remoteJid);
 
                 if(result?.error){
                     return res.status(500).json(result);
@@ -148,8 +148,8 @@ export default class ProfileRoutes{
                     return res.status(400).json({ error: "Field 'name' is required." });
                 }
 
-                const mediaController = new ProfileController(owner, instanceName);
-                const result = await mediaController.profileName(name);
+                const profileController = new ProfileController(owner, instanceName);
+                const result = await profileController.profileName(name);
 
                 if(result?.error){
                     return res.status(500).json(result);
@@ -173,8 +173,8 @@ export default class ProfileRoutes{
                     return res.status(400).json({ error: "Field 'status' is required." });
                 }
 
-                const mediaController = new ProfileController(owner, instanceName);
-                const result = await mediaController.profileStatus(status);
+                const profileController = new ProfileController(owner, instanceName);
+                const result = await profileController.profileStatus(status);
 
                 if(result?.error){
                     return res.status(500).json(result);
@@ -198,8 +198,8 @@ export default class ProfileRoutes{
                     return res.status(400).json({ error: "Fields 'jid', 'url' and 'active' is required." });
                 }
 
-                const mediaController = new ProfileController(owner, instanceName);
-                const result = await (url ? mediaController.updateProfilePicture(jid, url) : mediaController.removeProfilePicture(jid));
+                const profileController = new ProfileController(owner, instanceName);
+                const result = await (url ? profileController.updateProfilePicture(jid, url) : profileController.removeProfilePicture(jid));
 
                 if(result?.error){
                     return res.status(500).json(result);
