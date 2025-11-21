@@ -106,13 +106,13 @@ export default class PrismaConnection {
     }
 
     static async deleteByInstance(instance: string): Promise<Prisma.BatchPayload>{
-        PrismaConnection.conn.message.deleteMany({
+        await PrismaConnection.conn.message.deleteMany({
             where: { instance },
         });
-        PrismaConnection.conn.chat.deleteMany({
+        await PrismaConnection.conn.chat.deleteMany({
             where: { instance },
         });
-        return PrismaConnection.conn.contact.deleteMany({
+        return await PrismaConnection.conn.contact.deleteMany({
             where: { instance },
         });
     }
