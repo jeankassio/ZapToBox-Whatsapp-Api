@@ -5,11 +5,10 @@ FROM node:22-slim AS base
 
 RUN apt-get update && apt-get install -y \
     git \
+    ssh \
     ffmpeg \
     --no-install-recommends && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
-
-RUN apk add --no-cache git openssh
 
 WORKDIR /zaptobox
 
@@ -19,7 +18,10 @@ WORKDIR /zaptobox
 ############################################
 FROM base AS builder
 
-RUN apk add --no-cache git openssh-keygen
+RUN apt-get update && apt-get install -y \
+    openssh-client \
+    --no-install-recommends && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /zaptobox
 
