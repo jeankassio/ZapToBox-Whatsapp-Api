@@ -5,6 +5,7 @@ FROM node:22-slim AS base
 
 RUN apt-get update && apt-get install -y \
     git \
+    openssh-client \
     ffmpeg \
     --no-install-recommends && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
@@ -19,8 +20,17 @@ FROM base AS builder
 
 WORKDIR /zaptobox
 
-COPY package*.json ./
-COPY tsconfig.json ./
+RUN mkdir -p /root/.ssh && \
+    ssh-keygen -t rsa -b 4096 -C "docker@container" -N "" -f /root/.ssh/id_rsa && \
+    chmod 600 /root/.ssh/id_rsa && \
+    touch /root/.ssh/known_hosts && \
+    ssh-keyscan github.com >> /root/.ssh/known_hosts
+
+ENV GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no"
+
+
+COPY package*.json ./ 
+COPY tsconfig.json ./ 
 COPY prisma ./prisma
 COPY .env.example ./.env
 
@@ -31,6 +41,7 @@ COPY src ./src
 RUN npx prisma generate
 
 RUN npm run build
+
 
 
 ############################################
@@ -48,10 +59,7 @@ LABEL com.api.issues="https://github.com/jeankassio/ZapToBox-Whatsapp-Api/issues
 COPY --from=builder /zaptobox/dist ./dist
 COPY --from=builder /zaptobox/prisma ./prisma
 COPY --from=builder /zaptobox/node_modules ./node_modules
-COPY --from=builder /zaptobox/package*.json ./
-
-# Garante que o arquivo do worker seja copiado
-RUN test -f /zaptobox/dist/shared/webhookWorker.js || echo "Warning: webhookWorker.js not found"
+COPY --from=builder /zaptobox/package*.json ./ 
 
 RUN mkdir -p /zaptobox/sessions
 
