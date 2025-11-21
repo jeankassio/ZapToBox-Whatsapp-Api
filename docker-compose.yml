@@ -7,12 +7,37 @@ services:
     restart: always
     ports:
       - "3000:3000"
-    env_file:
-      - .env
+    environment:
+      - NODE_ENV=production
+      
+      - DATABASE_URL="postgresql://username:password@localhost:5432/dbname?schema=public"
+
+      - SESSION_FOLDER_NAME=sessions
+
+      - PORT=3000
+
+      - QRCODE_LIMIT=5
+      - QRCODE_TIMEOUT=20
+
+      - JWT_TOKEN=yourtokensecurehere123456789
+
+      - WEBHOOK_URL=http://localhost:8443/webhook
+
+      - SESSION=Linux
+      - PHONE_NAME=Edge
+
+      - PROXY_URL=
+
+      - WEBHOOK_QUEUE_DIR=./webhook-queue
+      - QUEUE_INTERVAL=5
+
     volumes:
       - ./sessions:/zaptobox/sessions
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+    networks:
+      - zaptobox_network
 
   db:
     image: postgres:16
@@ -24,6 +49,19 @@ services:
       POSTGRES_DB: zaptobox
     volumes:
       - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d zaptobox"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - zaptobox_network
 
 volumes:
   pgdata:
+
+networks:
+  zaptobox_network:
+    driver: bridge
