@@ -47,6 +47,16 @@ export async function genProxy(wppProxy?: string): Promise<ProxyAgent>{
 
     return proxys;
 }
+
+function serializeData(data: any): any {
+    try {
+        return JSON.parse(JSON.stringify(data));
+    } catch (err) {
+        console.warn('Failed to serialize data, returning empty object:', err);
+        return {};
+    }
+}
+
 export async function trySendWebhook(event: string, instance: InstanceData, data: any[]) {
     const payload = {
         event,
@@ -56,7 +66,7 @@ export async function trySendWebhook(event: string, instance: InstanceData, data
             connectionStatus: instance.connectionStatus,
             profilePictureUrl: instance.profilePictureUrl,
         },
-        data,
+        data: serializeData(data), // Serializa os dados antes de enviar
         targetUrl: UserConfig.webhookUrl
     };
 
