@@ -8,6 +8,9 @@
 [![forks - ZapToBox-Whatsapp-Api](https://img.shields.io/github/forks/jeankassio/ZapToBox-Whatsapp-Api?style=social)](https://github.com/jeankassio/ZapToBox-Whatsapp-Api)
   
 
+[![Support](https://img.shields.io/badge/-Grupo%20Whatsapp-darkgreen?style=for-the-badge&logo=whatsapp)](https://chat.whatsapp.com/Deus9QmrfZlJaZIf46F129)
+
+
 [![Support](https://img.shields.io/badge/Buy%20me%20coffe-PayPal-blue?style=for-the-badge)](https://paypal.me/JAlmeidaCheib)
 [![Support](https://img.shields.io/badge/Buy%20me%20coffe-Pix-darkturquoise?style=for-the-badge)](#pix)
 </div>
