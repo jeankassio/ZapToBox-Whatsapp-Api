@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y \
     git \
     ffmpeg \
     openssl \
+    openssh-client \
     --no-install-recommends && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
@@ -18,10 +19,11 @@ WORKDIR /zaptobox
 ############################################
 FROM base AS builder
 
-RUN git config --global url."https://github.com/".insteadOf ssh://git@github.com/ \
- && git config --global url."https://github.com/".insteadOf git@github.com:
-
 WORKDIR /zaptobox
+
+RUN git config --global url."https://github.com/".insteadOf ssh://git@github.com/ && \
+    git config --global url."https://".insteadOf git:// && \
+    git config --global url."https://".insteadOf ssh://
 
 COPY package*.json ./
 COPY tsconfig.json ./
@@ -48,6 +50,10 @@ LABEL com.api.maintainer="https://github.com/jeankassio"
 LABEL com.api.repository="https://github.com/jeankassio/ZapToBox-Whatsapp-Api"
 LABEL com.api.issues="https://github.com/jeankassio/ZapToBox-Whatsapp-Api/issues"
 
+RUN git config --global url."https://github.com/".insteadOf ssh://git@github.com/ && \
+    git config --global url."https://".insteadOf git:// && \
+    git config --global url."https://".insteadOf ssh://
+
 COPY package*.json ./
 COPY prisma ./prisma
 
@@ -62,4 +68,4 @@ ENV DOCKER_ENV=true
 
 EXPOSE 3000
 
-CMD npx prisma migrate deploy && node dist/main.js
+CMD ["sh", "-c", "npx prisma migrate deploy && node dist/main.js"]
