@@ -9,6 +9,7 @@ import makeWASocket, {
     getAggregateVotesInPollMessage,
     WAMessage,
     proto,
+    delay,
 } from "@whiskeysockets/baileys";
 import * as fs from "fs";
 import * as path from "path";
@@ -73,7 +74,7 @@ export default class Instance{
             logger: P({level: 'silent'}) as any,
             markOnlineOnConnect: false,
             cachedGroupMetadata: async (jid) => groupCache.get(jid),
-            getMessage: async (key) => await PrismaConnection.getMessageById(key.id!) as proto.IMessage,
+            getMessage: async (key) => await this.getMessage(key.id!) as proto.IMessage,
             qrTimeout: UserConfig.qrCodeTimeout * 1000
         });
 
@@ -371,6 +372,20 @@ export default class Instance{
         } catch {
             return undefined;
         }
+    }
+
+    async getMessage(key: string){
+
+        delay(2);
+
+        const message: WAMessage | undefined = await PrismaConnection.getMessageById(key);
+
+        if(message?.message){
+            return proto.Message.fromObject(message.message);
+        }
+
+        return proto.Message.fromObject({});
+
     }
 
 }
