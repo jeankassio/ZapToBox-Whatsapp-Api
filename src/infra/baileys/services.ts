@@ -79,13 +79,6 @@ export default class Instance{
             markOnlineOnConnect: false,
             cachedGroupMetadata: async (jid) => groupCache.get(jid),
             shouldIgnoreJid: (jid) => false,
-            getMessage: async (key) => {
-                // Ignorar getMessage para mensagens view once para evitar "Message absent from node"
-                if (key.id?.startsWith('BAE5')) {
-                    return proto.Message.fromObject({});
-                }
-                return await this.getMessage(key.id!) as proto.IMessage;
-            },
             qrTimeout: UserConfig.qrCodeTimeout * 1000
         });
 
