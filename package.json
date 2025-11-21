@@ -32,9 +32,11 @@
     "socks-proxy-agent": "^8.0.5",
     "undici": "^7.16.0"
   },
-  "overrides": {
+  "resolutions": {
+    "libsignal": "git+https://github.com/whiskeysockets/libsignal.git",
     "libsignal-node": "git+https://github.com/whiskeysockets/libsignal-node.git",
     "@whiskeysockets/libsignal": "git+https://github.com/whiskeysockets/libsignal.git",
+    "@whiskeysockets/libsignal-node": "git+https://github.com/whiskeysockets/libsignal-node.git",
     "@whiskeysockets/wa-signal": "git+https://github.com/whiskeysockets/wa-signal.git"
   },
   "devDependencies": {
