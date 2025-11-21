@@ -36,6 +36,8 @@ export default class Instance{
     private key!: string;
     private instancePath!: string;
     private qrCodeCount!: number;
+    private qrCodeResolver?: (qrBase64: string) => void;
+    private qrCodePromise?: Promise<string>;
 
     getSock(): (WASocket | undefined){
         return this?.sock;
@@ -91,11 +93,33 @@ export default class Instance{
 
         this.setStatus("OFFLINE");
 
+        // Criar Promise para aguardar o QR code
+        this.qrCodePromise = new Promise((resolve) => {
+            this.qrCodeResolver = resolve;
+        });
+
         this.instanceEvents(saveCreds);
 
         this.qrCodeCount = 0;
 
-        return this.instance;
+        let qrCodeReturn: string | undefined;
+
+        try {
+            const qrCode = await Promise.race([
+                this.qrCodePromise,
+                new Promise<string>((_, reject) => 
+                    setTimeout(() => reject(new Error('QR code timeout')), UserConfig.qrCodeTimeout * 1000)
+                )
+            ]);
+            qrCodeReturn = qrCode;
+        } catch {
+            qrCodeReturn = undefined;
+        }
+
+        return {
+            instance: this.instance,
+            qrCode: qrCodeReturn
+        };
 
     }
 
@@ -128,6 +152,11 @@ export default class Instance{
                         }
                     });
                     
+                    if (this.qrCodeResolver) {
+                        this.qrCodeResolver(qrBase64);
+                        delete this.qrCodeResolver;
+                    }
+
                     await trySendWebhook("qrcode.updated", this.instance, [{ qrBase64 }]);
 
                 }
@@ -144,6 +173,11 @@ export default class Instance{
                 this.sock.sendPresenceUpdate('unavailable');
 
                 await trySendWebhook("connection.open", this.instance, [update]);
+
+                if (this.qrCodeResolver) {
+                    this.qrCodeResolver('');
+                    delete this.qrCodeResolver;
+                }
 
             }else if(connection === "close"){
 

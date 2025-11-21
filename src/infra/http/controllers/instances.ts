@@ -15,7 +15,7 @@ export default class InstancesController {
 
                 instances[key] = new Instance;
 
-                const instance = await instances[key].create({ owner, instanceName });
+                const {instance, qrCode} = await instances[key].create({ owner, instanceName });
 
                 return {
                     success: true,
@@ -24,8 +24,9 @@ export default class InstancesController {
                         owner: instance.owner,
                         instanceName: instance.instanceName,
                         connectionStatus: instance.connectionStatus,
-                        profilePictureUrl: instance.profilePictureUrl || null,
-                    }
+                        profilePictureUrl: instance.profilePictureUrl || null
+                    },
+                    base64: qrCode || null
                 };
 
             }else{
