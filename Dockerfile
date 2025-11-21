@@ -27,7 +27,7 @@ COPY package*.json ./
 COPY tsconfig.json ./
 COPY prisma ./prisma
 
-RUN npm ci
+RUN npm install
 
 COPY src ./src
 
@@ -51,7 +51,7 @@ LABEL com.api.issues="https://github.com/jeankassio/ZapToBox-Whatsapp-Api/issues
 COPY package*.json ./
 COPY prisma ./prisma
 
-RUN npm ci --only=production && \
+RUN npm install --omit=dev && \
     npx prisma generate
 
 COPY --from=builder /zaptobox/dist ./dist
@@ -62,4 +62,4 @@ ENV DOCKER_ENV=true
 
 EXPOSE 3000
 
-CMD ["npx", "prisma", "migrate", "deploy", "&&", "node", "dist/main.js"]
+CMD npx prisma migrate deploy && node dist/main.js
