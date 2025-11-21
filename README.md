@@ -128,6 +128,21 @@ This enables:
 - connection.close
 - connection.removed
 
+
+## Status de Mensagem do WhatsApp (Baileys)
+
+The message status returned by Baileys is an integer (`status`). For quick reference when integrating it into your project, see below how to map it:
+
+| Número | String        
+|--------|---------------
+| 0      | ERROR         |
+| 1      | PENDING       |
+| 2      | SENT          |
+| 3      | DELIVERED     |
+| 4      | READ          |
+| 5      | PLAYED        |
+
+
 # Project Structure
 
 - `/prisma`
