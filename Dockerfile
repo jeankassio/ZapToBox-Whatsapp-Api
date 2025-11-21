@@ -5,7 +5,6 @@ FROM node:22-slim AS base
 
 RUN apt-get update && apt-get install -y \
     git \
-    ssh \
     ffmpeg \
     --no-install-recommends && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
@@ -18,10 +17,8 @@ WORKDIR /zaptobox
 ############################################
 FROM base AS builder
 
-RUN apt-get update && apt-get install -y \
-    openssh-client \
-    --no-install-recommends && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+RUN git config --global url."https://github.com/".insteadOf ssh://git@github.com/ \
+ && git config --global url."https://github.com/".insteadOf git@github.com:
 
 WORKDIR /zaptobox
 
