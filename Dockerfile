@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     openssl \
     openssh-client \
+    ca-certificates \
     --no-install-recommends && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
@@ -23,7 +24,8 @@ WORKDIR /zaptobox
 
 RUN git config --global url."https://github.com/".insteadOf ssh://git@github.com/ && \
     git config --global url."https://".insteadOf git:// && \
-    git config --global url."https://".insteadOf ssh://
+    git config --global url."https://".insteadOf ssh:// && \
+    git config --global http.sslVerify false
 
 COPY package*.json ./
 COPY tsconfig.json ./
@@ -52,7 +54,8 @@ LABEL com.api.issues="https://github.com/jeankassio/ZapToBox-Whatsapp-Api/issues
 
 RUN git config --global url."https://github.com/".insteadOf ssh://git@github.com/ && \
     git config --global url."https://".insteadOf git:// && \
-    git config --global url."https://".insteadOf ssh://
+    git config --global url."https://".insteadOf ssh:// && \
+    git config --global http.sslVerify false
 
 COPY package*.json ./
 COPY prisma ./prisma
