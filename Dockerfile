@@ -22,6 +22,7 @@ WORKDIR /zaptobox
 COPY package*.json ./
 COPY tsconfig.json ./
 COPY prisma ./prisma
+COPY .env.example ./.env
 
 RUN npm install --force
 
@@ -48,6 +49,9 @@ COPY --from=builder /zaptobox/dist ./dist
 COPY --from=builder /zaptobox/prisma ./prisma
 COPY --from=builder /zaptobox/node_modules ./node_modules
 COPY --from=builder /zaptobox/package*.json ./
+
+# Garante que o arquivo do worker seja copiado
+RUN test -f /zaptobox/dist/shared/webhookWorker.js || echo "Warning: webhookWorker.js not found"
 
 RUN mkdir -p /zaptobox/sessions
 
