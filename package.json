@@ -15,7 +15,7 @@
   "type": "commonjs",
   "dependencies": {
     "@prisma/client": "^6.19.0",
-    "@whiskeysockets/baileys": "^7.0.0-rc.6",
+    "@whiskeysockets/baileys": "^6.7.21",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
     "https-proxy-agent": "^7.0.6",
@@ -28,6 +28,9 @@
     "qrcode": "^1.5.4",
     "socks-proxy-agent": "^8.0.5",
     "undici": "^7.16.0"
+  },
+  "overrides": {
+    "libsignal-node": "git+https://github.com/whiskeysockets/libsignal-node.git"
   },
   "devDependencies": {
     "@types/express": "^5.0.5",
