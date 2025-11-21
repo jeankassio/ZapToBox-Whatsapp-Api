@@ -17,6 +17,14 @@ export default class PrismaConnection {
             return;
         }
 
+        const updateData: any = {
+            content: msg,
+        };
+
+        if (msg.pushName !== undefined && msg.pushName !== null) updateData.pushName = msg.pushName;
+        if (msg?.status !== undefined && msg?.status !== null) updateData.status = msg.status.toString();
+        if (msg.messageTimestamp !== undefined && msg.messageTimestamp !== null) updateData.messageTimestamp = BigInt(msg.messageTimestamp);
+
         return PrismaConnection.conn.message.upsert({
             where: {
                 instance_messageId: {
@@ -24,12 +32,7 @@ export default class PrismaConnection {
                     messageId: key.id,
                 },
             },
-            update: {
-                content: msg,
-                pushName: msg.pushName || null,
-                status: msg?.status?.toString() || null,
-                messageTimestamp: BigInt(msg.messageTimestamp || 0),
-            },
+            update: updateData,
             create: {
                 instance,
                 messageId: key.id,
@@ -58,28 +61,34 @@ export default class PrismaConnection {
 
         try{
 
-            const data = {
+            const createData = {
                 instance,
                 name: name ?? null,
                 jid: id ?? null,
                 lid: lid ?? null,
             };
 
+            const updateData: any = { instance };
+            
+            if (name !== undefined && name !== null) updateData.name = name;
+            if (id !== undefined && id !== null) updateData.jid = id;
+            if (lid !== undefined && lid !== null) updateData.lid = lid;
+
             if(id){
                 return await PrismaConnection.conn.contact.upsert({
                     where: {
                         instance_jid: { instance, jid: id }
                     },
-                    update: data,
-                    create: data
+                    update: updateData,
+                    create: createData
                 });
             }else if(lid){
                 return await PrismaConnection.conn.contact.upsert({
                     where: {
                         instance_lid: { instance, lid }
                     },
-                    update: data,
-                    create: data
+                    update: updateData,
+                    create: createData
                 });
             }
 
