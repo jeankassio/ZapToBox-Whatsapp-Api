@@ -23,8 +23,6 @@ COPY package*.json ./
 COPY tsconfig.json ./
 COPY prisma ./prisma
 
-RUN apt-get update && apt-get install -y openssh-client
-
 RUN npm install --force
 
 COPY src ./src

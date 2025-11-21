@@ -29,14 +29,12 @@
     "socks-proxy-agent": "^8.0.5",
     "undici": "^7.16.0"
   },
-  "overrides": {
-    "libsignal-node": "git+https://github.com/whiskeysockets/libsignal-node.git"
-  },
   "devDependencies": {
     "@types/express": "^5.0.5",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^24.10.1",
     "@types/qrcode": "^1.5.6",
+    "libsignal-node": "^2.0.1",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.9.3"
   }
