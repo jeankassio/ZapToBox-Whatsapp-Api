@@ -71,7 +71,7 @@ export default class Instance{
             fetchAgent: agents.fetchAgent,
             retryRequestDelayMs: 3 * 1000,
             maxMsgRetryCount: 1000,
-            logger: P({level: 'silent'}) as any,
+            logger: P({level: 'error'}),
             markOnlineOnConnect: false,
             cachedGroupMetadata: async (jid) => groupCache.get(jid),
             getMessage: async (key) => await this.getMessage(key.id!) as proto.IMessage,
@@ -374,9 +374,9 @@ export default class Instance{
         }
     }
 
-    async getMessage(key: string){
+    async getMessage(key: string): Promise<proto.IMessage> {
 
-        delay(2);
+        await delay(2);
 
         const message: WAMessage | undefined = await PrismaConnection.getMessageById(key);
 
