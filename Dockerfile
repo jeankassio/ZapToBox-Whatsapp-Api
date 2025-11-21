@@ -63,4 +63,4 @@ LABEL com.api.issues="https://github.com/jeankassio/ZapToBox-Whatsapp-Api/issues
 
 COPY --from=dependencies /zaptobox/node_modules ./node_modules
 COPY --from=builder /zaptobox/dist ./dist
-COPY --from=builder /zaptabox
+COPY --from=builder /zaptobox
