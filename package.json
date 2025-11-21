@@ -16,9 +16,6 @@
   "dependencies": {
     "@prisma/client": "^6.19.0",
     "@whiskeysockets/baileys": "^6.7.21",
-    "libsignal-node": "git+https://github.com/whiskeysockets/libsignal-node.git",
-    "@whiskeysockets/libsignal": "git+https://github.com/whiskeysockets/libsignal.git",
-    "@whiskeysockets/wa-signal": "git+https://github.com/whiskeysockets/wa-signal.git",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
     "https-proxy-agent": "^7.0.6",
@@ -31,13 +28,6 @@
     "qrcode": "^1.5.4",
     "socks-proxy-agent": "^8.0.5",
     "undici": "^7.16.0"
-  },
-  "resolutions": {
-    "libsignal": "git+https://github.com/whiskeysockets/libsignal.git",
-    "libsignal-node": "git+https://github.com/whiskeysockets/libsignal-node.git",
-    "@whiskeysockets/libsignal": "git+https://github.com/whiskeysockets/libsignal.git",
-    "@whiskeysockets/libsignal-node": "git+https://github.com/whiskeysockets/libsignal-node.git",
-    "@whiskeysockets/wa-signal": "git+https://github.com/whiskeysockets/wa-signal.git"
   },
   "devDependencies": {
     "@types/express": "^5.0.5",
