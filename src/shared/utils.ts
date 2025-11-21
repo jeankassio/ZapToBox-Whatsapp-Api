@@ -5,6 +5,7 @@ import { ProxyAgent as UndiciProxyAgent } from 'undici';
 import { ConnectionStatus, InstanceData, ProxyAgent, WebhookPayload } from './types';
 import path from "path";
 import UserConfig from "../infra/config/env"
+import { Worker } from 'worker_threads';
 
 
 export async function removeInstancePath(instancePath: string){
@@ -59,25 +60,31 @@ export async function trySendWebhook(event: string, instance: InstanceData, data
         targetUrl: UserConfig.webhookUrl
     };
 
-    try {
-        const res = await fetch(UserConfig.webhookUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-        });
+    const worker = new Worker(path.join(__dirname, 'webhookWorker.js'));
+    
+    worker.postMessage(payload);
+    
+    worker.on('message', async (result) => {
+        if (!result.success) {
+            console.warn(`[${instance.owner}/${instance.instanceName}] Fail to send webhook ${event}, saving locally...`);
+            await saveWebhookEvent(payload);
+        }
+        worker.terminate();
+    });
 
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    } catch (err) {
-        console.warn(`[${instance.owner}/${instance.instanceName}] Falha ao enviar webhook ${event}, salvando localmente...`);
+    worker.on('error', async (err) => {
+        console.warn(`[${instance.owner}/${instance.instanceName}] Fail in webhook worker ${event}:`, err);
         await saveWebhookEvent(payload);
-    }
+        worker.terminate();
+    });
+
 }
 
 async function ensureDir() {
     try {
         await fs.promises.mkdir(UserConfig.webhook_queue_dir, { recursive: true });
     } catch (err) {
-        console.error("Erro ao criar diretório de webhooks:", err);
+        console.error("Error creating webhook directory:", err);
     }
 }
 
@@ -88,50 +95,50 @@ export async function saveWebhookEvent(payload: WebhookPayload) {
         const filePath = path.join(UserConfig.webhook_queue_dir, filename);
         await fs.promises.writeFile(filePath, JSON.stringify(payload, null, 2), "utf8");
     } catch (err) {
-        console.error("Erro ao salvar webhook:", err);
+        console.error("Error saving webhook:", err);
     }
 }
 
-/**
- * Tenta reenviar todos os webhooks pendentes no diretório
- */
 export async function processWebhookQueue(getInstanceStatus: (name: string) => ConnectionStatus) {
     try {
         await ensureDir();
         const files = await fs.promises.readdir(UserConfig.webhook_queue_dir);
 
         for (const file of files) {
-        const filePath = path.join(UserConfig.webhook_queue_dir, file);
-        const raw = await fs.promises.readFile(filePath, "utf8");
-        const payload: WebhookPayload = JSON.parse(raw);
+            const filePath = path.join(UserConfig.webhook_queue_dir, file);
+            const raw = await fs.promises.readFile(filePath, "utf8");
+            const payload: WebhookPayload = JSON.parse(raw);
 
-        const status = getInstanceStatus(payload.instance.instanceName);
+            const status = getInstanceStatus(payload.instance.instanceName);
 
-        if(status !== "ONLINE"){
-            if(status === "REMOVED"){
-                await fs.promises.unlink(filePath);
+            if(status !== "ONLINE"){
+                if(status === "REMOVED"){
+                    await fs.promises.unlink(filePath);
+                }
+                continue;
             }
-            continue;
-        }
 
-        try {
-            const res = await fetch(payload.targetUrl, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(payload),
+            // Usa worker para reenviar webhook
+            const worker = new Worker(path.join(__dirname, 'webhookWorker.js'));
+            
+            worker.postMessage(payload);
+            
+            worker.on('message', async (result) => {
+                if (result.success) {
+                    await fs.promises.unlink(filePath);
+                } else {
+                    console.warn(`Fail to resend webhook ${file}: ${result.error}`);
+                }
+                worker.terminate();
             });
 
-            if (res.ok) {
-                await fs.promises.unlink(filePath);
-            } else {
-                console.warn(`Falha ao reenviar webhook ${file}: ${res.statusText}`);
-            }
-        } catch (err) {
-            console.warn(`Erro ao tentar reenviar webhook ${file}:`, (err as Error).message);
-        }
+            worker.on('error', async (err) => {
+                console.warn(`Error trying to resend webhook ${file}:`, err.message);
+                worker.terminate();
+            });
         }
     } catch (err) {
-        console.error("Erro ao processar fila de webhooks:", err);
+        console.error("Error processing webhook queue:", err);
     }
 }
 
@@ -146,7 +153,7 @@ export async function clearInstanceWebhooks(instanceName: string) {
             await fs.promises.unlink(path.join(UserConfig.webhook_queue_dir, file));
         }
     } catch (err) {
-        console.error(`Erro ao remover webhooks da instância ${instanceName}:`, err);
+        console.error(`Error removing webhooks for instance ${instanceName}:`, err);
     }
 }
 
