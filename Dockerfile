@@ -39,7 +39,7 @@ FROM base AS production
 
 WORKDIR /zaptobox
 
-LABEL com.api.version="1.0.0"
+LABEL com.api.version="1.1.0"
 LABEL com.api.maintainer="https://github.com/jeankassio"
 LABEL com.api.repository="https://github.com/jeankassio/ZapToBox-Whatsapp-Api"
 LABEL com.api.issues="https://github.com/jeankassio/ZapToBox-Whatsapp-Api/issues"
