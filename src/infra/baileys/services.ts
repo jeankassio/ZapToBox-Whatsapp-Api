@@ -78,7 +78,7 @@ export default class Instance{
             logger: P({level: 'fatal'}),
             markOnlineOnConnect: false,
             cachedGroupMetadata: async (jid) => groupCache.get(jid),
-            shouldIgnoreJid: (jid) => false,
+            getMessage: async (key) => await this.getMessage(key.id!) as proto.IMessage,
             qrTimeout: UserConfig.qrCodeTimeout * 1000
         });
 
@@ -412,16 +412,12 @@ export default class Instance{
 
     async getMessage(key: string): Promise<proto.IMessage> {
 
-        try {
-            await delay(2);
+        await delay(2);
 
-            const message: WAMessage | undefined = await PrismaConnection.getMessageById(key);
+        const message: WAMessage | undefined = await PrismaConnection.getMessageById(key);
 
-            if(message?.message){
-                return proto.Message.fromObject(message.message);
-            }
-        } catch (error) {
-            console.error(`Error getting message ${key}:`, error);
+        if(message?.message){
+            return proto.Message.fromObject(message.message);
         }
 
         return proto.Message.fromObject({});
