@@ -170,11 +170,7 @@ export default class Instance{
             }
         });
 
-        this.sock.ev.on("messaging-history.set", async({messages, chats, contacts}: BaileysEventMap['messaging-history.set']) => {
-
-            if(contacts && contacts.length > 0){
-                trySendWebhook("contacts.set", this.instance, contacts);
-            }
+        this.sock.ev.on("messaging-history.set", async({messages, chats}: BaileysEventMap['messaging-history.set']) => {
 
             if(chats && chats.length > 0){
                 trySendWebhook("chats.set", this.instance, chats);

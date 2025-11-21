@@ -1,8 +1,8 @@
-import { Prisma } from "@prisma/client";
 import { instances } from "../../../shared/constants";
-import { StatusPresence } from "../../../shared/types";
-import { AnyMessageContent, delay, WAMessage, WAMessageKey, WASocket } from "@whiskeysockets/baileys";
+import { AudioMessage, ContactMessage, DocumentMessage, GifMessage, ImageMessage, LocationMessage, PollMessage, ReactionMessage, StatusPresence, StickerMessage, TextMessage, VideoMessage } from "../../../shared/types";
+import { AnyMessageContent, delay, MessageContentGenerationOptions, WAMessage, WAMessageKey, WASocket } from "@whiskeysockets/baileys";
 import PrismaConnection from "../../../core/connection/prisma";
+import { JsonObject } from "@prisma/client/runtime/library";
 
 export default class MessagesController {
 
@@ -17,17 +17,155 @@ export default class MessagesController {
         this.delay = delay;
     }
 
-    async sendMessage(options: AnyMessageContent){
+    async filterOptions(rawOptions: JsonObject): Promise<MessageContentGenerationOptions>{
+
+        const options: any = {};
+
+        if(rawOptions?.quoted && typeof rawOptions.quoted == 'string'){
+
+            const quoted = await PrismaConnection.getMessageById(rawOptions.quoted);
+
+            if(quoted){
+                options.quoted = quoted;
+            }
+
+        }
+
+        return options;
+
+    }
+
+    async sendMessageText(message: TextMessage, rawOptions: JsonObject | undefined){
+
+        const options: MessageContentGenerationOptions | undefined = (rawOptions ? await this.filterOptions(rawOptions) : undefined);
+
+        return this.sendMessage(message, options);
+
+    }
+
+    
+    async sendMessageLocation(message: LocationMessage, rawOptions: JsonObject | undefined){
+
+        const options: MessageContentGenerationOptions | undefined = (rawOptions ? await this.filterOptions(rawOptions) : undefined);
+
+        return this.sendMessage(message, options);
+
+    }
+
+    
+    async sendMessageContact(message: ContactMessage, rawOptions: JsonObject | undefined){
+
+        const options: MessageContentGenerationOptions | undefined = (rawOptions ? await this.filterOptions(rawOptions) : undefined);
+
+        const vcard = 'BEGIN:VCARD\n'
+            + 'VERSION:3.0\n'
+            + `FN:${message.displayName}\n`
+            + 'ORG:ZapToBox Whatsapp Api;\n'
+            + `TEL;type=CELL;type=VOICE;waid=${message.waid}:${message.phoneNumber}\n`
+            + 'END:VCARD';
+
+        const contact: AnyMessageContent = {
+            contacts:{
+                displayName: message.displayName,
+                contacts: [{vcard}]
+            }
+        };
+
+        return this.sendMessage(contact, options);
+
+    }
+
+    async sendMessageReaction(reaction: ReactionMessage){
+
+        const options: undefined = undefined;
+
+        const messageReact = await PrismaConnection.getMessageById(reaction.messageId);
+
+        if(!messageReact){
+            return {
+                success: false,
+                error: "Failed to send message.",
+            };
+        }
+
+        const message:AnyMessageContent = {
+            react:{
+                text: reaction.emoji,
+                key: messageReact.key
+            }
+        };
+
+        return this.sendMessage(message, options);
+
+    }
+
+    async sendMessagePoll(message: PollMessage, rawOptions: JsonObject | undefined){
+
+        const options: undefined = undefined;
+
+        return this.sendMessage(message, options);
+
+    }
+
+    async sendMessageImage(message: ImageMessage, rawOptions: JsonObject | undefined){
+
+        const options: MessageContentGenerationOptions | undefined = (rawOptions ? await this.filterOptions(rawOptions) : undefined);
+
+        return this.sendMessage(message, options);
+
+    }
+
+    async sendMessageVideo(message: VideoMessage, rawOptions: JsonObject | undefined){
+
+        const options: MessageContentGenerationOptions | undefined = (rawOptions ? await this.filterOptions(rawOptions) : undefined);
+
+        return this.sendMessage(message, options);
+
+    }
+
+    async sendMessageGif(message: GifMessage, rawOptions: JsonObject | undefined){
+
+        const options: MessageContentGenerationOptions | undefined = (rawOptions ? await this.filterOptions(rawOptions) : undefined);
+
+        return this.sendMessage(message, options);
+
+    }
+
+    async sendMessageAudio(message: AudioMessage, rawOptions: JsonObject | undefined){
+
+        const options: MessageContentGenerationOptions | undefined = (rawOptions ? await this.filterOptions(rawOptions) : undefined);
+
+        return this.sendMessage(message, options);
+
+    }
+
+    async sendMessageDocument(message: DocumentMessage, rawOptions: JsonObject | undefined){
+
+        const options: MessageContentGenerationOptions | undefined = (rawOptions ? await this.filterOptions(rawOptions) : undefined);
+
+        return this.sendMessage(message, options);
+
+    }
+    
+    async sendMessageSticker(message: StickerMessage, rawOptions: JsonObject | undefined){
+
+        const options: MessageContentGenerationOptions | undefined = (rawOptions ? await this.filterOptions(rawOptions) : undefined);
+
+        return this.sendMessage(message, options);
+
+    }
+    
+    async sendMessage(message: AnyMessageContent, options: MessageContentGenerationOptions | undefined): Promise<JsonObject>{
         
         try{
 
-            const text = ("text" in options) ? options.text : ("caption" in options) ? options.caption : "";
+            const text = ("text" in message) ? message.text : ("caption" in message) ? message.caption : "";
 
-            const presence: StatusPresence = ("audio" in options ? "recording" : "composing");
+            const presence: StatusPresence = ("audio" in message ? "recording" : "composing");
             
             await this.simulateTyping(presence, text);
 
-            this.sock?.sendMessage(this.jid, options);
+            this.sock?.sendMessage(this.jid, message, options);
 
             return {
                 success: true,
@@ -45,7 +183,7 @@ export default class MessagesController {
 
     }
 
-    async deleteMessage(key: WAMessageKey, forEveryone: boolean){
+    async deleteMessage(key: WAMessageKey, forEveryone: boolean): Promise<JsonObject>{
 
         try{
         
@@ -78,7 +216,7 @@ export default class MessagesController {
         }
 
     }
-    async readMessage(messageId: WAMessageKey){
+    async readMessage(messageId: WAMessageKey): Promise<JsonObject>{
 
         try{
 
@@ -100,7 +238,7 @@ export default class MessagesController {
 
     }
 
-    async unStar(messageId: string, remoteJid: string, star: boolean){
+    async unStar(messageId: string, remoteJid: string, star: boolean): Promise<JsonObject>{
 
         try{
             
@@ -153,7 +291,7 @@ export default class MessagesController {
         return delayInMinutes * 60 * 1000; // convert to milliseconds
     }
 
-    async simulateTyping(compose: StatusPresence, text: string){
+    async simulateTyping(compose: StatusPresence, text: string): Promise<void>{
         
         await this.sock?.presenceSubscribe(this.jid);
 
