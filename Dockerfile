@@ -6,10 +6,24 @@ FROM node:22-slim AS base
 RUN apt-get update && apt-get install -y \
     git \
     ffmpeg \
+    openssl \
     --no-install-recommends && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /zaptobox
+
+
+############################################
+# DEPENDENCIES
+############################################
+FROM base AS dependencies
+
+WORKDIR /zaptobox
+
+COPY package*.json ./
+
+RUN npm ci --force --only=production && \
+    npm cache clean --force
 
 
 ############################################
@@ -26,13 +40,13 @@ COPY package*.json ./
 COPY tsconfig.json ./
 COPY prisma ./prisma
 
-RUN npm install --force
+RUN npm ci --force
 
 COPY src ./src
 
-RUN npx prisma migrate deploy
+RUN npx prisma generate
 
-RUN npm run start
+RUN npm run build
 
 
 ############################################
@@ -47,15 +61,6 @@ LABEL com.api.maintainer="https://github.com/jeankassio"
 LABEL com.api.repository="https://github.com/jeankassio/ZapToBox-Whatsapp-Api"
 LABEL com.api.issues="https://github.com/jeankassio/ZapToBox-Whatsapp-Api/issues"
 
+COPY --from=dependencies /zaptobox/node_modules ./node_modules
 COPY --from=builder /zaptobox/dist ./dist
-COPY --from=builder /zaptobox/prisma ./prisma
-COPY --from=builder /zaptobox/node_modules ./node_modules
-COPY --from=builder /zaptobox/package*.json ./
-
-RUN mkdir -p /zaptobox/sessions
-
-ENV DOCKER_ENV=true
-
-EXPOSE 3000
-
-CMD ["node", "dist/main.js"]
+COPY --from=builder /zaptabox
