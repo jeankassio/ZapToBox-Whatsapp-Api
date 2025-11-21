@@ -14,19 +14,6 @@ WORKDIR /zaptobox
 
 
 ############################################
-# DEPENDENCIES
-############################################
-FROM base AS dependencies
-
-WORKDIR /zaptobox
-
-COPY package*.json ./
-
-RUN npm ci --force --only=production && \
-    npm cache clean --force
-
-
-############################################
 # BUILDER
 ############################################
 FROM base AS builder
@@ -40,7 +27,7 @@ COPY package*.json ./
 COPY tsconfig.json ./
 COPY prisma ./prisma
 
-RUN npm ci --force
+RUN npm ci
 
 COPY src ./src
 
@@ -61,6 +48,18 @@ LABEL com.api.maintainer="https://github.com/jeankassio"
 LABEL com.api.repository="https://github.com/jeankassio/ZapToBox-Whatsapp-Api"
 LABEL com.api.issues="https://github.com/jeankassio/ZapToBox-Whatsapp-Api/issues"
 
-COPY --from=dependencies /zaptobox/node_modules ./node_modules
+COPY package*.json ./
+COPY prisma ./prisma
+
+RUN npm ci --only=production && \
+    npx prisma generate
+
 COPY --from=builder /zaptobox/dist ./dist
-COPY --from=builder /zaptobox
+
+RUN mkdir -p /zaptobox/sessions
+
+ENV DOCKER_ENV=true
+
+EXPOSE 3000
+
+CMD ["npx", "prisma", "migrate", "deploy", "&&", "node", "dist/main.js"]
