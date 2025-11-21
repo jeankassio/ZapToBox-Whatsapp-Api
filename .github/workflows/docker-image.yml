@@ -15,4 +15,4 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Build the Docker image
-      run: docker --no-cache build . --file Dockerfile --t zaptobox:$(date +%s)
+      run: docker run -d --name zaptobox -p 3000:3000 --env-file .env zaptobox-whatsapp-api:$(date +%s)
