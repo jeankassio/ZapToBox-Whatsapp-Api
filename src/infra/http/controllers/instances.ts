@@ -3,10 +3,11 @@ import InstancesRepository from "../../../core/repositories/instances";
 import { instances, instanceStatus, sessionsPath } from "../../../shared/constants";
 import { clearInstanceWebhooks, removeInstancePath } from "../../../shared/utils";
 import path from "path";
+import { InstanceCreated } from "../../../shared/types";
 
 export default class InstancesController {
 
-    async create(owner: string, instanceName: string) {
+    async create(owner: string, instanceName: string, phoneNumber: string | undefined) {
         try {
             
             const key = `${owner}_${instanceName}`;
@@ -15,19 +16,26 @@ export default class InstancesController {
 
                 instances[key] = new Instance;
 
-                const {instance, qrCode} = await instances[key].create({ owner, instanceName });
+                const {instance, qrCode, pairingCode} = await instances[key].create({ owner, instanceName, phoneNumber });
 
-                return {
+                const response: InstanceCreated = {
                     success: true,
-                    message: "Instance Created with Successfully!",
+                    message: "Instance Created Successfully!",
                     instance: {
                         owner: instance.owner,
                         instanceName: instance.instanceName,
                         connectionStatus: instance.connectionStatus,
-                        profilePictureUrl: instance.profilePictureUrl || null
+                        profilePictureUrl: instance.profilePictureUrl || undefined
                     },
-                    base64: qrCode || null
                 };
+
+                if(pairingCode){
+                    response.pairingCode = pairingCode;
+                }else if(qrCode){
+                    response.qrCode = qrCode;
+                }
+
+                return response;
 
             }else{
 
@@ -73,7 +81,7 @@ export default class InstancesController {
             const instancePath = path.join(sessionsPath, owner, instanceName);
             await removeInstancePath(instancePath);
 
-            return this.create(owner, instanceName);
+            return this.create(owner, instanceName, undefined);
 
         }catch(err: any){
             console.error("Error on connect instance:", err);
@@ -98,7 +106,7 @@ export default class InstancesController {
 
             return {
                 success: true,
-                message: "Instance removed with success"
+                message: "Instance removed successfully"
             }
 
         }catch(err: any){

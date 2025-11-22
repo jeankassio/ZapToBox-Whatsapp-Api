@@ -16,7 +16,7 @@ export default class Sessions{
             for (const instanceName of instancesDirs) {
                 const key = `${owner}_${instanceName}`;
                 instances[key] = new Instance;
-                await instances[key].create({ owner, instanceName });
+                await instances[key].create({ owner, instanceName, phoneNumber: undefined });
             }
         }
 

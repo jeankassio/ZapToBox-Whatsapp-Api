@@ -50,6 +50,8 @@ ZapToBox WhatsApp API is an advanced REST platform built on top of Baileys, enab
 
 - Automatic reconnection and failure handling
 
+- Connection with QrCode and Pairing Code
+
 
 # Features
 
@@ -124,6 +126,8 @@ This enables:
 - messages.set
 - qrcode.updated
 - qrcode.limit
+- pairingcode.updated
+- pairingcode.limit
 - connection.open
 - connection.close
 - connection.removed

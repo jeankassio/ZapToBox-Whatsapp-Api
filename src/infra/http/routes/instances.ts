@@ -12,13 +12,13 @@ export default class InstanceRoutes{
         this.router
             .post("/create", async (req: Request, res: Response) => {
 
-                const { owner, instanceName } = req.body;
+                const { owner, instanceName, phoneNumber } = req.body;
                 
                 if (!owner || !instanceName) {
                     return res.status(400).json({ error: "Fields 'owner' and 'instanceName' is required" });
                 }
 
-                const result = await instancesController.create(owner, instanceName);
+                const result = await instancesController.create(owner, instanceName, phoneNumber);
 
                 if(result?.error){
                     return res.status(500).json(result);

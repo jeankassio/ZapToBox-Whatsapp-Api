@@ -15,6 +15,15 @@ export interface InstanceData extends InstanceInfo{
   socket?: WASocket;
 }
 
+export type InstanceCreated = {
+  success: boolean;
+  message?: string;
+  error?: string;
+  instance?: InstanceInfo;
+  qrCode?: string;
+  pairingCode?: string;
+}
+
 export interface WebhookPayload {
   event: string;
   instance: InstanceInfo;

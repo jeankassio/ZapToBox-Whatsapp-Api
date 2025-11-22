@@ -38,14 +38,16 @@ export default class Instance{
     private qrCodeCount!: number;
     private qrCodeResolver?: (qrBase64: string) => void;
     private qrCodePromise?: Promise<string>;
+    private phoneNumber?: string | undefined;
 
     getSock(): (WASocket | undefined){
         return this?.sock;
     }
 
-    async create(data: { owner: string; instanceName: string }) {
+    async create(data: { owner: string; instanceName: string , phoneNumber: string | undefined}) {
         this.owner = data.owner;
         this.instanceName = data.instanceName;
+        this.phoneNumber = data.phoneNumber?.replace(/\D/g, "");
         
         this.instancePath = path.join(sessionsPath, this.owner, this.instanceName);
         if (!fs.existsSync(path.join(sessionsPath, this.owner))){
@@ -62,7 +64,6 @@ export default class Instance{
         const agents = await genProxy(UserConfig.proxyUrl);
 
         this.sock = makeWASocket({
-            browser,
             auth: state,
             version,
             emitOwnEvents: true,
@@ -105,22 +106,49 @@ export default class Instance{
         this.qrCodeCount = 0;
 
         let qrCodeReturn: string | undefined;
+        let pairingCodeReturn: string | undefined;
 
-        try {
-            const qrCode = await Promise.race([
-                this.qrCodePromise,
-                new Promise<string>((_, reject) => 
-                    setTimeout(() => reject(new Error('QR code timeout')), UserConfig.qrCodeTimeout * 1000)
-                )
-            ]);
-            qrCodeReturn = qrCode;
-        } catch {
-            qrCodeReturn = undefined;
+        if(this.phoneNumber){
+
+            if(!this.sock.authState.creds.registered){
+
+                try {
+                
+                    const pNumber = this.phoneNumber;
+
+                    await delay(500);
+
+                    pairingCodeReturn = await this.sock.requestPairingCode(pNumber);
+
+                    console.log(pairingCodeReturn);
+
+                } catch(err) {
+                    console.log("Error requesting pairing code:", err);
+                    pairingCodeReturn = undefined;
+                }
+
+            }
+
+        }else{
+
+            try {
+                const qrCode = await Promise.race([
+                    this.qrCodePromise,
+                    new Promise<string>((_, reject) => 
+                        setTimeout(() => reject(new Error('QR code timeout')), UserConfig.qrCodeTimeout * 1000)
+                    )
+                ]);
+                qrCodeReturn = qrCode;
+            } catch {
+                qrCodeReturn = undefined;
+            }
+
         }
 
         return {
             instance: this.instance,
-            qrCode: qrCodeReturn
+            qrCode: qrCodeReturn,
+            pairingCode: pairingCodeReturn
         };
 
     }
@@ -132,7 +160,28 @@ export default class Instance{
         this.sock.ev.on("connection.update", async (update: BaileysEventMap['connection.update']) => {
             const { connection, lastDisconnect, qr } = update;
 
-            if(qr){
+            if(this.phoneNumber && qr){
+
+                await delay(1500);
+                const pairingCode = await this.sock.requestPairingCode(this.phoneNumber);
+
+                if(this.qrCodeCount > UserConfig.qrCodeLimit){
+
+                    console.log(`[${this.owner}/${this.instanceName}] PAIRING CODE LIMIT REACHED`);
+                    await trySendWebhook("pairingcode.limit", this.instance, [{ pairingCodeLimit: UserConfig.qrCodeLimit }]);
+
+                    await this.clearInstance();
+
+                }else{
+
+                    this.qrCodeCount++;
+                    console.log(`Pairing Code: ${pairingCode}`);
+
+                    await trySendWebhook("pairingcode.updated", this.instance, [{ pairingCode }]);
+
+                }
+
+            }else if(qr){
 
                 this.qrCodeCount++;
 
@@ -192,7 +241,7 @@ export default class Instance{
                 if (shouldReconnect) {
                     
                     await trySendWebhook("connection.close", this.instance, [{ reason }]);
-                    await this.create({ owner:this.owner, instanceName:this.instanceName });
+                    await this.create({ owner:this.owner, instanceName:this.instanceName, phoneNumber: this.phoneNumber});
 
                 } else {
                     
