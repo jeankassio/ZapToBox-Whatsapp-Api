@@ -66,7 +66,7 @@ export async function trySendWebhook(event: string, instance: InstanceData, data
             owner: instance.owner,
             connectionStatus: instance.connectionStatus,
             profilePictureUrl: instance.profilePictureUrl,
-            instanceJid: jidNormalizedUser(instance.socket?.user?.id) || null
+            instanceJid: jidNormalizedUser(instance.socket?.user?.id) || null 
         },
         data: serializeData(data),
         targetUrl: UserConfig.webhookUrl
