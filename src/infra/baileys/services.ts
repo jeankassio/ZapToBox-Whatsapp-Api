@@ -66,6 +66,7 @@ export default class Instance{
         this.sock = makeWASocket({
             auth: state,
             version,
+            browser,
             emitOwnEvents: true,
             generateHighQualityLinkPreview: true,
             syncFullHistory: true,
