@@ -45,8 +45,8 @@ export default class Instance{
     }
 
     async create(data: { owner: string; instanceName: string , phoneNumber: string | undefined}) {
-        this.owner = data.owner;
-        this.instanceName = data.instanceName;
+        this.owner = String(data.owner);
+        this.instanceName = String(data.instanceName);
         this.phoneNumber = data.phoneNumber?.replace(/\D/g, "");
         
         this.instancePath = path.join(sessionsPath, this.owner, this.instanceName);
