@@ -9,6 +9,7 @@ export default class Token{
         const secret = UserConfig.jwtToken;
         
         if(!token || !secret){
+            console.log("Token or secret is missing");
             return res.status(401).json({
                 error: "Invalid Token" 
             });
@@ -18,6 +19,7 @@ export default class Token{
             jwt.verify(token, secret);
             next();
         } catch (error) {
+            console.error("Token verification error:", error);
             return res.status(401).json({
                 error: "Invalid Token" 
             });
