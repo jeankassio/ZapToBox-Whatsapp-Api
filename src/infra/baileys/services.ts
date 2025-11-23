@@ -212,6 +212,12 @@ export default class Instance{
 
                 }
 
+            }else if(connection === "connecting"){
+
+                this.setStatus("OFFLINE");
+
+                await trySendWebhook("connection.connecting", this.instance, [update]);
+
             }else if (connection === "open"){
 
                 this.setStatus("ONLINE");

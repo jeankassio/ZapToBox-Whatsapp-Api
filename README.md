@@ -128,6 +128,7 @@ This enables:
 - qrcode.limit
 - pairingcode.updated
 - pairingcode.limit
+- connection.connecting
 - connection.open
 - connection.close
 - connection.removed
