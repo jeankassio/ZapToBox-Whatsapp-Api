@@ -6,6 +6,7 @@ import { ConnectionStatus, InstanceData, ProxyAgent, WebhookPayload } from './ty
 import path from "path";
 import UserConfig from "../infra/config/env"
 import { Worker } from 'worker_threads';
+import { jidNormalizedUser } from "@whiskeysockets/baileys";
 
 
 export async function removeInstancePath(instancePath: string){
@@ -65,7 +66,7 @@ export async function trySendWebhook(event: string, instance: InstanceData, data
             owner: instance.owner,
             connectionStatus: instance.connectionStatus,
             profilePictureUrl: instance.profilePictureUrl,
-            instanceJid: instance.socket?.user?.id || null
+            instanceJid: jidNormalizedUser(instance.socket?.user?.id) || null 
         },
         data: serializeData(data),
         targetUrl: UserConfig.webhookUrl
