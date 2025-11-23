@@ -16,6 +16,8 @@ export default class Token{
         }
 
         try {
+            console.log(token);
+            console.log(secret);
             jwt.verify(token, secret);
             next();
         } catch (error) {
