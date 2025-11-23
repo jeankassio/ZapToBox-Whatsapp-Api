@@ -65,8 +65,9 @@ export async function trySendWebhook(event: string, instance: InstanceData, data
             owner: instance.owner,
             connectionStatus: instance.connectionStatus,
             profilePictureUrl: instance.profilePictureUrl,
+            instanceJid: instance.socket?.user?.id || null
         },
-        data: serializeData(data), // Serializa os dados antes de enviar
+        data: serializeData(data),
         targetUrl: UserConfig.webhookUrl
     };
 
