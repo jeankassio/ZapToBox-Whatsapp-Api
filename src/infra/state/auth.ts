@@ -8,13 +8,20 @@ export default class Token{
         const token = req.headers?.authorization?.replace(/^Bearer\s+/i, "");;
         const secret = UserConfig.jwtToken;
         
-        if(!token || !secret || !jwt.verify(token, secret)){
+        if(!token || !secret){
             return res.status(401).json({
                 error: "Invalid Token" 
             });
         }
-        
-        next();
+
+        try {
+            jwt.verify(token, secret);
+            next();
+        } catch (error) {
+            return res.status(401).json({
+                error: "Invalid Token" 
+            });
+        }
     }
 
 }
