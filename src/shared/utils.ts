@@ -6,7 +6,7 @@ import { ConnectionStatus, InstanceData, ProxyAgent, WebhookPayload } from './ty
 import path from "path";
 import UserConfig from "../infra/config/env"
 import { Worker } from 'worker_threads';
-import { jidNormalizedUser } from "@whiskeysockets/baileys";
+import { getContentType, jidNormalizedUser } from "@whiskeysockets/baileys";
 
 
 export async function removeInstancePath(instancePath: string){
@@ -59,6 +59,9 @@ function serializeData(data: any): any {
 }
 
 export async function trySendWebhook(event: string, instance: InstanceData, data: any[]) {
+
+    const enrichedData = enrichMessagesWithType(data);
+
     const payload = {
         event,
         instance: {
@@ -68,7 +71,7 @@ export async function trySendWebhook(event: string, instance: InstanceData, data
             profilePictureUrl: instance.profilePictureUrl,
             instanceJid: jidNormalizedUser(instance.socket?.user?.id) || null 
         },
-        data: serializeData(data),
+        data: serializeData(enrichedData),
         targetUrl: UserConfig.webhookUrl
     };
 
@@ -89,7 +92,44 @@ export async function trySendWebhook(event: string, instance: InstanceData, data
         await saveWebhookEvent(payload);
         worker.terminate();
     });
+}
 
+function enrichMessagesWithType(data: any) {
+
+    // Caso seja um objeto com `.messages`
+    if (data && Array.isArray(data.messages)) {
+        data.messages = data.messages.map((m: any) => ({
+            ...m,
+            messageType: getSafeMessageType(m)
+        }));
+        return data;
+    }
+
+    // Caso seja um array contendo objetos, algum deles podendo ter `.messages`
+    if (Array.isArray(data)) {
+        return data.map(item => {
+            if (item && Array.isArray(item.messages)) {
+                return {
+                    ...item,
+                    messages: item.messages.map((m: any) => ({
+                        ...m,
+                        messageType: getSafeMessageType(m)
+                    }))
+                };
+            }
+            return item;
+        });
+    }
+
+    return data;
+}
+
+function getSafeMessageType(message: any): string | null {
+    try {
+        return getContentType(message?.message) || null;
+    } catch {
+        return null;
+    }
 }
 
 async function ensureDir() {
