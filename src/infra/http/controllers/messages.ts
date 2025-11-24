@@ -165,7 +165,14 @@ export default class MessagesController {
             
             await this.simulateTyping(presence, text);
 
-            this.sock?.sendMessage(this.jid, message, options);
+            const sentMessage: WAMessage | undefined = await this.sock?.sendMessage(this.jid, message, options);
+
+            if(!sentMessage || !sentMessage.key || !sentMessage.key.id){
+                return {
+                    success: false,
+                    message: "Failed to send message.",
+                };
+            }
 
             return {
                 success: true,
@@ -176,7 +183,7 @@ export default class MessagesController {
 
             return {
                 success: false,
-                error: "Failed to send message.",
+                error: "Failed to send message: " + (err as Error).message,
             };
 
         }
