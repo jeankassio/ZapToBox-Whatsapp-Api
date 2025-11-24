@@ -10,6 +10,7 @@ export default class UserConfig{
     static sessionClient: string = process.env.SESSION || "Linux";
     static sessionName: string = process.env.PHONE_NAME || "Edge";
     static proxyUrl: (string | undefined) = process.env.PROXY_URL;
+    static useWebhookQueue: boolean = (process.env.WEBHOOK_QUEUE === 'true');
     static webhook_queue_dir: string = process.env.WEBHOOK_QUEUE_DIR || "./webhook";
     static webhook_interval: number = (Number(process.env.QUEUE_INTERVAL) * 60 * 1000) || 5 * 60 * 1000;
     static qrCodeLimit: number = Number(process.env.QRCODE_LIMIT || 5);
