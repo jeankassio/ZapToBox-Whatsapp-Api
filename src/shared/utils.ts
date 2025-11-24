@@ -101,15 +101,14 @@ export async function trySendWebhook(event: string, instance: InstanceData, data
 function enrichMessagesWithType(data: any) {
 
     // Caso seja um objeto com `.messages`
-    if (data && Array.isArray(data.messages)) {
-        data.messages = data.messages.map((m: any) => ({
+    if (data && Array.isArray(data)) {
+        data = data.map((m: any) => ({
             ...m,
             messageType: getSafeMessageType(m)
         }));
         return data;
     }
 
-    // Caso seja um array contendo objetos, algum deles podendo ter `.messages`
     if (Array.isArray(data)) {
         return data.map(item => {
             if (item && Array.isArray(item)) {
