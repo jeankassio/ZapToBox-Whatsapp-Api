@@ -82,14 +82,18 @@ export async function trySendWebhook(event: string, instance: InstanceData, data
     worker.on('message', async (result) => {
         if (!result.success) {
             console.warn(`[${instance.owner}/${instance.instanceName}] Fail to send webhook ${event}, saving locally...`);
-            await saveWebhookEvent(payload);
+            if(UserConfig.useWebhookQueue){
+                await saveWebhookEvent(payload);
+            }
         }
         worker.terminate();
     });
 
     worker.on('error', async (err) => {
         console.warn(`[${instance.owner}/${instance.instanceName}] Fail in webhook worker ${event}:`, err);
-        await saveWebhookEvent(payload);
+        if(UserConfig.useWebhookQueue){
+            await saveWebhookEvent(payload);
+        }
         worker.terminate();
     });
 }
