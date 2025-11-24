@@ -1,6 +1,6 @@
 {
   "name": "zaptobox-whatsapp-api",
-  "version": "1.2.1",
+  "version": "1.2.6",
   "description": "REST API platform for integrating systems with WhatsApp with stability, multiple instances, message sending, and event webhooking. Ideal for automation, bots, and enterprise systems.",
   "main": "./dist/main.js",
   "scripts": {

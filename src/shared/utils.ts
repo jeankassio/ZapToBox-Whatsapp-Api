@@ -108,13 +108,10 @@ function enrichMessagesWithType(data: any) {
     // Caso seja um array contendo objetos, algum deles podendo ter `.messages`
     if (Array.isArray(data)) {
         return data.map(item => {
-            if (item && Array.isArray(item.messages)) {
+            if (item && Array.isArray(item)) {
                 return {
                     ...item,
-                    messages: item.messages.map((m: any) => ({
-                        ...m,
-                        messageType: getSafeMessageType(m)
-                    }))
+                    messageType: getSafeMessageType(item)
                 };
             }
             return item;
@@ -126,7 +123,7 @@ function enrichMessagesWithType(data: any) {
 
 function getSafeMessageType(message: any): string | null {
     try {
-        return getContentType(message?.message) || null;
+        return getContentType(message) || null;
     } catch {
         return null;
     }
