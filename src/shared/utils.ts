@@ -210,7 +210,9 @@ export async function clearInstanceWebhooks(instanceName: string) {
 }
 
 export function startWebhookRetryLoop(getInstanceStatus: (name: string) => "ONLINE" | "OFFLINE" | "REMOVED") {
-    setInterval(() => {
-        processWebhookQueue(getInstanceStatus);
-    }, UserConfig.webhook_interval);
+    if(UserConfig.useWebhookQueue){
+        setInterval(() => {
+            processWebhookQueue(getInstanceStatus);
+        }, UserConfig.webhook_interval);
+    }
 }
