@@ -58,7 +58,7 @@ function serializeData(data: any): any {
     }
 }
 
-export async function trySendWebhook(event: string, instance: InstanceData, data: any[]) {
+export async function trySendWebhook(event: string, instance: InstanceData, data: any) {
 
     const enrichedData = enrichMessagesWithType(data);
 
