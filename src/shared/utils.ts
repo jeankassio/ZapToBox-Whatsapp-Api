@@ -111,7 +111,7 @@ function enrichMessagesWithType(data: any) {
 
     if (Array.isArray(data)) {
         return data.map(item => {
-            if (item && Array.isArray(item)) {
+            if (item && item.message) {
                 return {
                     ...item,
                     messageType: getSafeMessageType(item)
@@ -126,7 +126,7 @@ function enrichMessagesWithType(data: any) {
 
 function getSafeMessageType(message: any): string | null {
     try {
-        return getContentType(message) || null;
+        return getContentType(message.message) || null;
     } catch {
         return null;
     }
