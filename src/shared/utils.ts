@@ -58,7 +58,7 @@ function serializeData(data: any): any {
     }
 }
 
-export async function trySendWebhook(event: string, instance: InstanceData, data: any[]) {
+export async function trySendWebhook(event: string, instance: InstanceData, data: any) {
 
     const enrichedData = enrichMessagesWithType(data);
 
@@ -101,18 +101,17 @@ export async function trySendWebhook(event: string, instance: InstanceData, data
 function enrichMessagesWithType(data: any) {
 
     // Caso seja um objeto com `.messages`
-    if (data && Array.isArray(data.messages)) {
-        data.messages = data.messages.map((m: any) => ({
+    if (data && Array.isArray(data)) {
+        data = data.map((m: any) => ({
             ...m,
             messageType: getSafeMessageType(m)
         }));
         return data;
     }
 
-    // Caso seja um array contendo objetos, algum deles podendo ter `.messages`
     if (Array.isArray(data)) {
         return data.map(item => {
-            if (item && Array.isArray(item)) {
+            if (item && item.message) {
                 return {
                     ...item,
                     messageType: getSafeMessageType(item)
@@ -127,7 +126,7 @@ function enrichMessagesWithType(data: any) {
 
 function getSafeMessageType(message: any): string | null {
     try {
-        return getContentType(message) || null;
+        return getContentType(message.message) || null;
     } catch {
         return null;
     }
@@ -211,7 +210,9 @@ export async function clearInstanceWebhooks(instanceName: string) {
 }
 
 export function startWebhookRetryLoop(getInstanceStatus: (name: string) => "ONLINE" | "OFFLINE" | "REMOVED") {
-    setInterval(() => {
-        processWebhookQueue(getInstanceStatus);
-    }, UserConfig.webhook_interval);
+    if(UserConfig.useWebhookQueue){
+        setInterval(() => {
+            processWebhookQueue(getInstanceStatus);
+        }, UserConfig.webhook_interval);
+    }
 }

@@ -169,7 +169,7 @@ export default class Instance{
                 if(this.qrCodeCount > UserConfig.qrCodeLimit){
 
                     console.log(`[${this.owner}/${this.instanceName}] PAIRING CODE LIMIT REACHED`);
-                    await trySendWebhook("pairingcode.limit", this.instance, [{ pairingCodeLimit: UserConfig.qrCodeLimit }]);
+                    await trySendWebhook("pairingcode.limit", this.instance, { pairingCodeLimit: UserConfig.qrCodeLimit });
 
                     await this.clearInstance();
 
@@ -178,7 +178,7 @@ export default class Instance{
                     this.qrCodeCount++;
                     console.log(`Pairing Code: ${pairingCode}`);
 
-                    await trySendWebhook("pairingcode.updated", this.instance, [{ pairingCode }]);
+                    await trySendWebhook("pairingcode.updated", this.instance, { pairingCode });
 
                 }
 
@@ -190,7 +190,7 @@ export default class Instance{
 
                     console.log(`[${this.owner}/${this.instanceName}] QRCODE LIMIT REACHED`);
 
-                    await trySendWebhook("qrcode.limit", this.instance, [{ qrCodeLimit: UserConfig.qrCodeLimit }]);
+                    await trySendWebhook("qrcode.limit", this.instance, { qrCodeLimit: UserConfig.qrCodeLimit });
 
                     await this.clearInstance();
 
@@ -209,7 +209,7 @@ export default class Instance{
                         delete this.qrCodeResolver;
                     }
 
-                    await trySendWebhook("qrcode.updated", this.instance, [{ qrCode: qrBase64 }]);
+                    await trySendWebhook("qrcode.updated", this.instance, { qrCode: qrBase64 });
 
                 }
 
@@ -217,7 +217,7 @@ export default class Instance{
 
                 this.setStatus("OFFLINE");
 
-                await trySendWebhook("connection.connecting", this.instance, [update]);
+                await trySendWebhook("connection.connecting", this.instance, update);
 
             }else if (connection === "open"){
 
@@ -230,7 +230,7 @@ export default class Instance{
                 
                 this.sock.sendPresenceUpdate('unavailable');
 
-                await trySendWebhook("connection.open", this.instance, [update]);
+                await trySendWebhook("connection.open", this.instance, update);
 
                 if (this.qrCodeResolver) {
                     this.qrCodeResolver('');
@@ -247,7 +247,7 @@ export default class Instance{
 
                 if (shouldReconnect) {
                     
-                    await trySendWebhook("connection.close", this.instance, [ reason ]);
+                    await trySendWebhook("connection.close", this.instance, reason);
                     await this.create({ owner:this.owner, instanceName:this.instanceName, phoneNumber: this.phoneNumber});
 
                 } else {
@@ -255,7 +255,7 @@ export default class Instance{
                     console.log(`[${this.owner}/${this.instanceName}] REMOVED`);
                     console.log(`Reason: ${DisconnectReason[reason!]}`);
 
-                    await trySendWebhook("connection.removed", this.instance, [ reason ]);
+                    await trySendWebhook("connection.removed", this.instance, reason);
                     
                     await this.clearInstance();
 
@@ -266,50 +266,50 @@ export default class Instance{
         this.sock.ev.on("messaging-history.set", async({messages, chats}: BaileysEventMap['messaging-history.set']) => {
 
             if(chats && chats.length > 0){
-                trySendWebhook("chats.set", this.instance, [chats]);
+                trySendWebhook("chats.set", this.instance, chats);
             }
 
             if(messages && messages.length > 0){
                 PrismaConnection.saveManyMessages(`${this.instance.owner}_${this.instance.instanceName}`, messages);
-                trySendWebhook("messages.set", this.instance, [messages]);
+                trySendWebhook("messages.set", this.instance, messages);
             }
 
         });
 
         this.sock.ev.on("chats.upsert", async (chats: BaileysEventMap['chats.upsert']) => {
-            await trySendWebhook("chats.upsert", this.instance, [chats]);
+            await trySendWebhook("chats.upsert", this.instance, chats);
         });
 
         this.sock.ev.on("chats.update", async (chats: BaileysEventMap['chats.update']) => {
-            await trySendWebhook("chats.update", this.instance, [chats]);
+            await trySendWebhook("chats.update", this.instance, chats);
         });
 
         this.sock.ev.on("chats.delete", async (ids: BaileysEventMap['chats.delete']) => {
-            await trySendWebhook("chats.delete", this.instance, [ids]);
+            await trySendWebhook("chats.delete", this.instance, ids);
         });
 
         this.sock.ev.on("lid-mapping.update", async (mapping: BaileysEventMap['lid-mapping.update']) => {
-            await trySendWebhook("lid-mapping.update", this.instance, [mapping]);
+            await trySendWebhook("lid-mapping.update", this.instance, mapping);
         });
 
         this.sock.ev.on("presence.update", async (presence: BaileysEventMap['presence.update']) => {
-            await trySendWebhook("presence.update", this.instance, [presence]);
+            await trySendWebhook("presence.update", this.instance, presence);
         });
 
         this.sock.ev.on("contacts.upsert", async (contacts: BaileysEventMap['contacts.upsert']) => {
             PrismaConnection.saveManyContacts(`${this.instance.owner}_${this.instance.instanceName}`, contacts);
-            await trySendWebhook("contacts.upsert", this.instance, [contacts]);
+            await trySendWebhook("contacts.upsert", this.instance, contacts);
         });
 
         this.sock.ev.on("contacts.update", async (contacts: BaileysEventMap['contacts.update']) => {
             PrismaConnection.saveManyContacts(`${this.instance.owner}_${this.instance.instanceName}`, contacts);
-            await trySendWebhook("contacts.update", this.instance, [contacts]);
+            await trySendWebhook("contacts.update", this.instance, contacts);
         });
 
         this.sock.ev.on("messages.upsert", async (messages: BaileysEventMap['messages.upsert']) => {
             this.sock.sendPresenceUpdate('unavailable');
             PrismaConnection.saveManyMessages(`${this.instance.owner}_${this.instance.instanceName}`, messages.messages);
-            await trySendWebhook("messages.upsert", this.instance, [messages.messages]);
+            await trySendWebhook("messages.upsert", this.instance, messages.messages);
         });
 
         this.sock.ev.on("messages.update", async (updates: BaileysEventMap['messages.update']) => {
@@ -338,80 +338,80 @@ export default class Instance{
                 })
             );
 
-            await trySendWebhook("messages.update", this.instance, [nupdates]);
+            await trySendWebhook("messages.update", this.instance, nupdates);
         });
 
         this.sock.ev.on("messages.delete", async (deletes: BaileysEventMap['messages.delete']) => {
-            await trySendWebhook("messages.delete", this.instance, [deletes]);
+            await trySendWebhook("messages.delete", this.instance, deletes);
         });
 
         this.sock.ev.on("messages.media-update", async (mediaUpdates: BaileysEventMap['messages.media-update']) => {
-            await trySendWebhook("messages.media-update", this.instance, [mediaUpdates]);
+            await trySendWebhook("messages.media-update", this.instance, mediaUpdates);
         });
 
         this.sock.ev.on("messages.reaction", async (reactions: BaileysEventMap['messages.reaction']) => {
-            await trySendWebhook("messages.reaction", this.instance, [reactions]);
+            await trySendWebhook("messages.reaction", this.instance, reactions);
         });
 
         this.sock.ev.on("message-receipt.update", async (receipts: BaileysEventMap['message-receipt.update']) => {
-            await trySendWebhook("message-receipt.update", this.instance, [receipts]);
+            await trySendWebhook("message-receipt.update", this.instance, receipts);
         });
 
         this.sock.ev.on("groups.upsert", async (groups: BaileysEventMap['groups.upsert']) => {
-            await trySendWebhook("groups.upsert", this.instance, [groups]);
+            await trySendWebhook("groups.upsert", this.instance, groups);
         });
 
         this.sock.ev.on("groups.update", async (groups: BaileysEventMap['groups.update']) => {
             const [event] = groups;
             const metadata = await this.sock.groupMetadata(event?.id!);
             groupCache.set(event?.id!, metadata);
-            await trySendWebhook("groups.update", this.instance, [groups]);
+            await trySendWebhook("groups.update", this.instance, groups);
         });
 
         this.sock.ev.on("group-participants.update", async (update: BaileysEventMap['group-participants.update']) => {
             const metadata = await this.sock.groupMetadata(update.id);
             groupCache.set(update.id, metadata);
-            await trySendWebhook("group-participants.update", this.instance, [update]);
+            await trySendWebhook("group-participants.update", this.instance, update);
         });
 
         this.sock.ev.on("group.join-request", async (request: BaileysEventMap['group.join-request']) => {
-            await trySendWebhook("group.join-request", this.instance, [request]);
+            await trySendWebhook("group.join-request", this.instance, request);
         });
 
         this.sock.ev.on("blocklist.set", async (blocklist: BaileysEventMap['blocklist.set']) => {
-            await trySendWebhook("blocklist.set", this.instance, [blocklist]);
+            await trySendWebhook("blocklist.set", this.instance, blocklist);
         });
 
         this.sock.ev.on("blocklist.update", async (update: BaileysEventMap['blocklist.update']) => {
-            await trySendWebhook("blocklist.update", this.instance, [update]);
+            await trySendWebhook("blocklist.update", this.instance, update);
         });
 
         this.sock.ev.on("call", async (calls: BaileysEventMap['call']) => {
-            await trySendWebhook("call", this.instance, [calls]);
+            await trySendWebhook("call", this.instance, calls);
         });
 
         this.sock.ev.on("labels.edit", async (label: BaileysEventMap['labels.edit']) => {
-            await trySendWebhook("labels.edit", this.instance, [label]);
+            await trySendWebhook("labels.edit", this.instance, label);
         });
 
         this.sock.ev.on("labels.association", async (assoc: BaileysEventMap['labels.association']) => {
-            await trySendWebhook("labels.association", this.instance, [assoc]);
+            await trySendWebhook("labels.association", this.instance, assoc);
         });
 
         this.sock.ev.on("newsletter.reaction", async (reaction: BaileysEventMap['newsletter.reaction']) => {
-            await trySendWebhook("newsletter.reaction", this.instance, [reaction]);
+            await trySendWebhook("newsletter.reaction", this.instance, reaction);
         });
 
         this.sock.ev.on("newsletter.view", async (view: BaileysEventMap['newsletter.view']) => {
-            await trySendWebhook("newsletter.view", this.instance, [view]);
+            await trySendWebhook("newsletter.view", this.instance, view);
         });
 
         this.sock.ev.on("newsletter-participants.update", async (update: BaileysEventMap['newsletter-participants.update']) => {
-            await trySendWebhook("newsletter-participants.update", this.instance, [update]);
+            await trySendWebhook("newsletter-participants.update", this.instance, update);
         });
 
         this.sock.ev.on("newsletter-settings.update", async (update: BaileysEventMap['newsletter-settings.update']) => {
-            await trySendWebhook("newsletter-settings.update", this.instance, [update]);
+            await trySendWebhook("newsletter-settings.update", this.instance, update);
         });
 
 
