@@ -273,7 +273,7 @@ export default class Instance{
 
                 const rawMessages: MessageWebhook[] = [];
 
-                for(const [, msg] of Object.entries(messages)){
+                for(const msg of messages){
 
                     if(msg.message?.protocolMessage || msg.message?.senderKeyDistributionMessage || !msg.message){
                         continue;
@@ -303,7 +303,7 @@ export default class Instance{
                     });
                 }
 
-                PrismaConnection.saveManyMessages(`${this.instance.owner}_${this.instance.instanceName}`, rawMessages);
+                PrismaConnection.saveManyMessages(`${this.instance.owner}_${this.instance.instanceName}`, messages);
                 trySendWebhook("messages.set", this.instance, rawMessages);
             }
 
@@ -342,9 +342,9 @@ export default class Instance{
         this.sock.ev.on("messages.upsert", async (messages: BaileysEventMap['messages.upsert']) => {
             this.sock.sendPresenceUpdate('unavailable');
 
-            const rawMessages: WAMessage[] = [];
+            const rawMessages: MessageWebhook[] = [];
 
-            for(let msg of messages.messages){
+            for(const msg of messages.messages){
 
                 if(!msg?.message){
                     await this.sock.waitForMessage(msg.key.id!);
@@ -369,12 +369,13 @@ export default class Instance{
 
                 msg.messageTimestamp = timestamp;
 
-                (msg as any).messageType = contentType || undefined;
-
-                rawMessages.push(msg);
+                rawMessages.push({
+                    ...msg,
+                    messageType: contentType
+                });
             }
 
-            PrismaConnection.saveManyMessages(`${this.instance.owner}_${this.instance.instanceName}`, rawMessages);
+            PrismaConnection.saveManyMessages(`${this.instance.owner}_${this.instance.instanceName}`, messages.messages);
             await trySendWebhook("messages.upsert", this.instance, rawMessages);
             
         });
