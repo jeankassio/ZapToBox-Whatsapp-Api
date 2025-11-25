@@ -298,9 +298,10 @@ export default class Instance{
 
                     msg.messageTimestamp = timestamp;
 
-                    (msg as any).messageType = contentType || undefined;
-
-                    rawMessages.push(msg);
+                    rawMessages.push({
+                        ...msg,
+                        messageType: contentType
+                    });
                 }
 
                 PrismaConnection.saveManyMessages(`${this.instance.owner}_${this.instance.instanceName}`, rawMessages);
