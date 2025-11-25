@@ -26,7 +26,9 @@ export default class MediaRoutes{
                 const mediaController = new MediaController(owner, instanceName);
                 const result = await mediaController.getMedia(messageId, isBase64);
 
-                if(!result?.success || result?.base64){
+                if(result.error){
+                    return res.status(400).json({ error: result.error });
+                }else if(result?.base64){
                     return res.json(result);
                 }else{
                     res.setHeader("Content-Type", result.mimeType);

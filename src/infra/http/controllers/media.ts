@@ -42,26 +42,38 @@ export default class MediaController {
                 };
             }
 
-            const buffer = await downloadMediaMessage(msg, "buffer", {}, {logger: this.sock?.logger, reuploadRequest: this.sock?.updateMediaMessage!});
+            try{
 
-            const mimeType = (content as any)[isMediaMessage!].mimetype || "application/octet-stream";
+                const buffer = await downloadMediaMessage(msg, "buffer", {}, {logger: this.sock?.logger, reuploadRequest: this.sock?.updateMediaMessage!});
 
-            if(isBase64){
+                const mimeType = (content as any)[isMediaMessage!].mimetype || "application/octet-stream";
 
-                const base64Data = buffer.toString('base64');
+                if(isBase64){
 
+                    const base64Data = buffer.toString('base64');
+
+                    return {
+                        success: true,
+                        base64: `data:${mimeType};base64,${base64Data}`,
+                    };
+
+                }else{
+                    return {
+                        success: true,
+                        buffer: buffer,
+                        mimeType: mimeType,
+                    };
+                }
+
+            }catch(err){
+                console.error("Error downloading media message:", err);
                 return {
-                    success: true,
-                    base64: `data:${mimeType};base64,${base64Data}`,
-                };
-
-            }else{
-                return {
-                    success: true,
-                    buffer: buffer,
-                    mimeType: mimeType,
+                    success: false,
+                    error: "Error downloading media message.",
                 };
             }
+
+            
 
         }catch(err){
             console.error("Error fetching media message:", err);
