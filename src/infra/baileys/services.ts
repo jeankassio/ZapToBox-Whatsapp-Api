@@ -20,7 +20,7 @@ import NodeCache from "node-cache"
 import P from "pino";
 import { baileysEvents, instanceConnection, instances, instanceStatus, sessionsPath } from "../../shared/constants";
 import { clearInstanceWebhooks, genProxy, removeInstancePath, trySendWebhook } from "../../shared/utils";
-import { ConnectionStatus, InstanceData } from "../../shared/types";
+import { ConnectionStatus, InstanceData, MessageWebhook } from "../../shared/types";
 import UserConfig from "../config/env";
 import PrismaConnection from "../../core/connection/prisma";
 
@@ -272,7 +272,7 @@ export default class Instance{
 
             if(messages && messages.length > 0){
 
-                const rawMessages: WAMessage[] = [];
+                const rawMessages: MessageWebhook[] = [];
 
                 for(let msg of messages){
 

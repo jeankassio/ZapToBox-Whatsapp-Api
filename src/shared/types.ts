@@ -32,6 +32,10 @@ export interface WebhookPayload {
   targetUrl: string;
 }
 
+export interface MessageWebhook extends WAMessage{
+  messageType?: string;
+}
+
 export interface ProxyAgent{
   wsAgent?: any,
   fetchAgent?: any
