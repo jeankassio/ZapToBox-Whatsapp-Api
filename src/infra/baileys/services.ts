@@ -66,7 +66,6 @@ export default class Instance{
         const browser: WABrowserDescription  = [UserConfig.sessionClient, UserConfig.sessionName, release()];
         const agents = await genProxy(UserConfig.proxyUrl);
 
-        // Criar Promise para aguardar o QR code
         this.qrCodePromise = new Promise((resolve) => {
             this.qrCodeResolver = resolve;
         });
@@ -93,13 +92,13 @@ export default class Instance{
                 qrTimeout: UserConfig.qrCodeTimeout * 1000
             });
         }catch(err){
-            console.error(`[${this.owner}/${this.instanceName}] Erro ao criar socket`, err);
+            console.error(`[${this.owner}/${this.instanceName}] Error creating socket`, err);
             await this.reconnectWithBackoff();
             throw err;
         }
 
         this.sock = sock;
-        this.attachSocketErrorHandlers(); // novo: listeners específicos
+        this.attachSocketErrorHandlers();
 
         this.key = `${this.owner}_${this.instanceName}`;
 
@@ -167,27 +166,24 @@ export default class Instance{
     }
 
     private attachSocketErrorHandlers(){
-        // Listener de erro no websocket interno
         try{
             this.sock?.ws?.on?.('error', (err: any) => this.handleSocketError(err));
             this.sock?.ws?.on?.('close', () => {
-                // fechamento inesperado sem gerar connection.update
                 if(this.instance?.connectionStatus === 'ONLINE'){
-                    console.warn(`[${this.owner}/${this.instanceName}] ws fechado inesperadamente`);
+                    console.warn(`[${this.owner}/${this.instanceName}] ws closed unexpectedly`);
                     this.handleSocketError(new Error('ws closed'));
                 }
             });
         }catch(e){
-            console.warn(`[${this.owner}/${this.instanceName}] Falha ao registrar handlers ws`, e);
+            console.warn(`[${this.owner}/${this.instanceName}] Failed to register ws handlers`, e);
         }
 
-        // Se agentes proxy existirem podemos tentar ouvir eventos
         try{
             const anySock: any = this.sock;
             anySock?.options?.agent?.on?.('error', (err: any) => this.handleSocketError(err));
             anySock?.options?.fetchAgent?.on?.('error', (err: any) => this.handleSocketError(err));
         }catch(e){
-            // silencioso
+            console.warn(`[${this.owner}/${this.instanceName}] Failed to register agents handlers`, e);
         }
     }
 
@@ -196,7 +192,7 @@ export default class Instance{
         const msg = String(err?.message || '');
         const code = err?.code;
         const isUndici = code === 'UND_ERR_SOCKET' || /terminated/i.test(msg) || /other side closed/i.test(msg);
-        console.error(`[${this.owner}/${this.instanceName}] Socket/Fetch error capturado`, { code, msg });
+        console.error(`[${this.owner}/${this.instanceName}] Socket/Fetch error captured`, { code, msg });
         if(isUndici){
             this.reconnectWithBackoff();
         }
@@ -205,28 +201,27 @@ export default class Instance{
     private async reconnectWithBackoff(){
         if(this.instance?.connectionStatus === 'REMOVED') return;
         if(this.reconnectAttempts >= this.maxReconnectAttempts){
-            console.error(`[${this.owner}/${this.instanceName}] Limite de reconexões atingido`);
+            console.error(`[${this.owner}/${this.instanceName}] Reconnection limit reached`);
             return;
         }
         const wait = Math.min(30000, 1000 * 2 ** this.reconnectAttempts);
         this.reconnectAttempts++;
-        console.log(`[${this.owner}/${this.instanceName}] Tentando reconectar em ${wait}ms (tentativa ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+        console.log(`[${this.owner}/${this.instanceName}] Trying to reconnect in ${wait}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
         await delay(wait);
         try{
             await this.create({ owner: this.owner, instanceName: this.instanceName, phoneNumber: this.phoneNumber });
         }catch(e){
-            console.error(`[${this.owner}/${this.instanceName}] Falha na reconexão`, e);
+            console.error(`[${this.owner}/${this.instanceName}] Reconnection failed`, e);
         }
     }
 
     private registerGlobalHandlers(){
-        // Evita derrubar processo por erro não tratado de stream/undici
         if(!(global as any).__zap_global_error_wrapped){
             (global as any).__zap_global_error_wrapped = true;
 
             process.on('uncaughtException', (err) => {
                 if(/terminated/i.test(String(err?.message))){
-                    console.error('UncaughtException (terminated) capturado. Processo preservado.');
+                    console.error('UncaughtException (terminated) captured. Process preserved.');
                 }else{
                     console.error('UncaughtException', err);
                 }
@@ -234,7 +229,7 @@ export default class Instance{
 
             process.on('unhandledRejection', (reason: any) => {
                 if(/terminated/i.test(String(reason?.message))){
-                    console.error('UnhandledRejection (terminated) capturado.');
+                    console.error('UnhandledRejection (terminated) captured. Process preserved.');
                 }else{
                     console.error('UnhandledRejection', reason);
                 }
@@ -398,7 +393,8 @@ export default class Instance{
                     });
                 }
 
-                await PrismaConnection.saveManyMessages(`${this.instance.owner}_${this.instance.instanceName}`, messages);
+                const sanitized = messages.map(m => this.sanitizeWAMessage(m));
+                await PrismaConnection.saveManyMessages(`${this.instance.owner}_${this.instance.instanceName}`, sanitized);
                 trySendWebhook("messages.set", this.instance, rawMessages);
             }
 
@@ -470,7 +466,8 @@ export default class Instance{
                 });
             }
 
-            await PrismaConnection.saveManyMessages(`${this.instance.owner}_${this.instance.instanceName}`, messages.messages);
+            const sanitized = messages.messages.map(m => this.sanitizeWAMessage(m));
+            await PrismaConnection.saveManyMessages(`${this.instance.owner}_${this.instance.instanceName}`, sanitized);
             await trySendWebhook("messages.upsert", this.instance, rawMessages);
             
         });
@@ -641,6 +638,36 @@ export default class Instance{
 
         return proto.Message.fromObject({});
 
+    }
+
+    private deepSanitize(value: any): any {
+        if (value === null || value === undefined) return value;
+        if (typeof value === 'bigint') return Number(value);
+        if (typeof value === 'function') return undefined;
+        if (value instanceof Uint8Array) return Buffer.from(value).toString('base64');
+        if (Array.isArray(value)) {
+            return value.map(v => this.deepSanitize(v)).filter(v => v !== undefined);
+        }
+        if (typeof value === 'object') {
+            if ('low' in value && 'high' in value &&
+                typeof (value as any).low === 'number' &&
+                typeof (value as any).high === 'number') {
+                const low = (value as any).low >>> 0;
+                const high = (value as any).high >>> 0;
+                return high * 2 ** 32 + low;
+            }
+            const out: any = {};
+            for (const [k, v] of Object.entries(value)) {
+                const sv = this.deepSanitize(v);
+                if (sv !== undefined) out[k] = sv;
+            }
+            return out;
+        }
+        return value;
+    }
+
+    private sanitizeWAMessage(msg: any): any {
+        return this.deepSanitize(msg);
     }
 
 }
