@@ -40,6 +40,8 @@ export default class Instance{
     private qrCodeResolver?: (qrBase64: string) => void;
     private qrCodePromise?: Promise<string>;
     private phoneNumber?: string | undefined;
+    private reconnectAttempts = 0;
+    private maxReconnectAttempts = 5;
 
     getSock(): (WASocket | undefined){
         return this?.sock;
@@ -64,25 +66,40 @@ export default class Instance{
         const browser: WABrowserDescription  = [UserConfig.sessionClient, UserConfig.sessionName, release()];
         const agents = await genProxy(UserConfig.proxyUrl);
 
-        this.sock = makeWASocket({
-            auth: state,
-            version,
-            browser,
-            emitOwnEvents: true,
-            generateHighQualityLinkPreview: true,
-            syncFullHistory: true,
-            msgRetryCounterCache: msgRetryCounterCache,
-            userDevicesCache: userDevicesCache,
-            enableAutoSessionRecreation: true,
-            agent: agents.wsAgent,
-            fetchAgent: agents.fetchAgent,
-            retryRequestDelayMs: 3 * 1000,
-            maxMsgRetryCount: 1000,
-            logger: P({level: 'fatal'}),
-            cachedGroupMetadata: async (jid) => groupCache.get(jid),
-            getMessage: async (key) => await this.getMessage(key.id!) as proto.IMessage,
-            qrTimeout: UserConfig.qrCodeTimeout * 1000
+        // Criar Promise para aguardar o QR code
+        this.qrCodePromise = new Promise((resolve) => {
+            this.qrCodeResolver = resolve;
         });
+
+        let sock: WASocket | undefined;
+        try{
+            sock = makeWASocket({
+                auth: state,
+                version,
+                browser,
+                emitOwnEvents: true,
+                generateHighQualityLinkPreview: true,
+                syncFullHistory: true,
+                msgRetryCounterCache: msgRetryCounterCache,
+                userDevicesCache: userDevicesCache,
+                enableAutoSessionRecreation: true,
+                agent: agents.wsAgent,
+                fetchAgent: agents.fetchAgent,
+                retryRequestDelayMs: 3 * 1000,
+                maxMsgRetryCount: 1000,
+                logger: P({level: 'fatal'}),
+                cachedGroupMetadata: async (jid) => groupCache.get(jid),
+                getMessage: async (key) => await this.getMessage(key.id!) as proto.IMessage,
+                qrTimeout: UserConfig.qrCodeTimeout * 1000
+            });
+        }catch(err){
+            console.error(`[${this.owner}/${this.instanceName}] Erro ao criar socket`, err);
+            await this.reconnectWithBackoff();
+            throw err;
+        }
+
+        this.sock = sock;
+        this.attachSocketErrorHandlers(); // novo: listeners específicos
 
         this.key = `${this.owner}_${this.instanceName}`;
 
@@ -96,11 +113,6 @@ export default class Instance{
         instanceConnection[this.key] = this.instance;
 
         this.setStatus("OFFLINE");
-
-        // Criar Promise para aguardar o QR code
-        this.qrCodePromise = new Promise((resolve) => {
-            this.qrCodeResolver = resolve;
-        });
 
         this.instanceEvents(saveCreds);
 
@@ -152,6 +164,82 @@ export default class Instance{
             pairingCode: pairingCodeReturn
         };
 
+    }
+
+    private attachSocketErrorHandlers(){
+        // Listener de erro no websocket interno
+        try{
+            this.sock?.ws?.on?.('error', (err: any) => this.handleSocketError(err));
+            this.sock?.ws?.on?.('close', () => {
+                // fechamento inesperado sem gerar connection.update
+                if(this.instance?.connectionStatus === 'ONLINE'){
+                    console.warn(`[${this.owner}/${this.instanceName}] ws fechado inesperadamente`);
+                    this.handleSocketError(new Error('ws closed'));
+                }
+            });
+        }catch(e){
+            console.warn(`[${this.owner}/${this.instanceName}] Falha ao registrar handlers ws`, e);
+        }
+
+        // Se agentes proxy existirem podemos tentar ouvir eventos
+        try{
+            const anySock: any = this.sock;
+            anySock?.options?.agent?.on?.('error', (err: any) => this.handleSocketError(err));
+            anySock?.options?.fetchAgent?.on?.('error', (err: any) => this.handleSocketError(err));
+        }catch(e){
+            // silencioso
+        }
+    }
+
+    private handleSocketError(err: any){
+        if(!err) return;
+        const msg = String(err?.message || '');
+        const code = err?.code;
+        const isUndici = code === 'UND_ERR_SOCKET' || /terminated/i.test(msg) || /other side closed/i.test(msg);
+        console.error(`[${this.owner}/${this.instanceName}] Socket/Fetch error capturado`, { code, msg });
+        if(isUndici){
+            this.reconnectWithBackoff();
+        }
+    }
+
+    private async reconnectWithBackoff(){
+        if(this.instance?.connectionStatus === 'REMOVED') return;
+        if(this.reconnectAttempts >= this.maxReconnectAttempts){
+            console.error(`[${this.owner}/${this.instanceName}] Limite de reconexões atingido`);
+            return;
+        }
+        const wait = Math.min(30000, 1000 * 2 ** this.reconnectAttempts);
+        this.reconnectAttempts++;
+        console.log(`[${this.owner}/${this.instanceName}] Tentando reconectar em ${wait}ms (tentativa ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+        await delay(wait);
+        try{
+            await this.create({ owner: this.owner, instanceName: this.instanceName, phoneNumber: this.phoneNumber });
+        }catch(e){
+            console.error(`[${this.owner}/${this.instanceName}] Falha na reconexão`, e);
+        }
+    }
+
+    private registerGlobalHandlers(){
+        // Evita derrubar processo por erro não tratado de stream/undici
+        if(!(global as any).__zap_global_error_wrapped){
+            (global as any).__zap_global_error_wrapped = true;
+
+            process.on('uncaughtException', (err) => {
+                if(/terminated/i.test(String(err?.message))){
+                    console.error('UncaughtException (terminated) capturado. Processo preservado.');
+                }else{
+                    console.error('UncaughtException', err);
+                }
+            });
+
+            process.on('unhandledRejection', (reason: any) => {
+                if(/terminated/i.test(String(reason?.message))){
+                    console.error('UnhandledRejection (terminated) capturado.');
+                }else{
+                    console.error('UnhandledRejection', reason);
+                }
+            });
+        }
     }
 
     async instanceEvents(saveCreds: () => Promise<void>){
