@@ -79,7 +79,6 @@ export default class Instance{
             retryRequestDelayMs: 3 * 1000,
             maxMsgRetryCount: 1000,
             logger: P({level: 'fatal'}),
-            markOnlineOnConnect: false,
             cachedGroupMetadata: async (jid) => groupCache.get(jid),
             getMessage: async (key) => await this.getMessage(key.id!) as proto.IMessage,
             qrTimeout: UserConfig.qrCodeTimeout * 1000
