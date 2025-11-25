@@ -230,9 +230,9 @@ export default class Instance{
                 
                 this.sock.sendPresenceUpdate('unavailable');
 
-                await delay(2);
-
-                await trySendWebhook("connection.open", this.instance, update);
+                setTimeout(async () => {
+                    await trySendWebhook("connection.open", this.instance, update);
+                },2000);
 
                 if (this.qrCodeResolver) {
                     this.qrCodeResolver('');
