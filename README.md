@@ -122,6 +122,7 @@ This enables:
 
 #### And as additional webhook events:
 
+- contacts.set
 - chats.set
 - messages.set
 - qrcode.updated
