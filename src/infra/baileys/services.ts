@@ -155,6 +155,35 @@ export default class Instance{
 
     }
 
+    // Adiciona helpers para reutilizar lógica e limitar messageType aos eventos desejados
+    private normalizeTimestamp(raw: any): number {
+        if(raw && typeof raw === 'object' && typeof raw.toNumber === 'function'){
+            return raw.toNumber();
+        }else if(raw && typeof raw === 'object' && 'low' in raw){
+            return Number(raw.low) || 0;
+        }else if(typeof raw !== 'number'){
+            return 0;
+        }
+        return raw;
+    }
+
+    private buildMessagesWithType(source: WAMessage[]): MessageWebhook[] {
+        const list: MessageWebhook[] = [];
+        for(const msg of source){
+            if(!msg?.message) continue;
+            if(msg.message.protocolMessage || msg.message.senderKeyDistributionMessage) continue;
+
+            const contentType = getContentType(msg.message);
+            if(!contentType) continue;
+
+            msg.messageTimestamp = this.normalizeTimestamp(msg.messageTimestamp);
+            (msg as any).messageType = contentType;
+
+            list.push(msg as MessageWebhook);
+        }
+        return list;
+    }
+
     async instanceEvents(saveCreds: () => Promise<void>){
 
         this.sock.ev.on("creds.update", saveCreds as (data: BaileysEventMap["creds.update"]) => void);
@@ -271,38 +300,7 @@ export default class Instance{
             }
 
             if(messages && messages.length > 0){
-
-                const rawMessages: MessageWebhook[] = [];
-
-                for(let msg of messages){
-
-                    if(msg.message?.protocolMessage || msg.message?.senderKeyDistributionMessage || !msg.message){
-                        continue;
-                    }
-
-                    const contentType = getContentType(msg?.message);
-
-                    if(!contentType){
-                        continue;
-                    }
-
-                    let timestamp = msg?.messageTimestamp;
-
-                    if(timestamp && typeof timestamp === 'object' && typeof timestamp.toNumber === 'function'){
-                        timestamp = timestamp.toNumber();
-                    }else if(timestamp && typeof timestamp === 'object' && 'low' in timestamp){
-                        timestamp = Number((timestamp as any).low) || 0;
-                    }else if(typeof timestamp !== 'number'){
-                        timestamp = 0;
-                    }
-
-                    msg.messageTimestamp = timestamp;
-
-                    (msg as any).messageType = contentType || undefined;
-
-                    rawMessages.push(msg);
-                }
-
+                const rawMessages = this.buildMessagesWithType(messages);
                 PrismaConnection.saveManyMessages(`${this.instance.owner}_${this.instance.instanceName}`, rawMessages);
                 trySendWebhook("messages.set", this.instance, rawMessages);
             }
@@ -342,40 +340,9 @@ export default class Instance{
         this.sock.ev.on("messages.upsert", async (messages: BaileysEventMap['messages.upsert']) => {
             this.sock.sendPresenceUpdate('unavailable');
 
-            const rawMessages: WAMessage[] = [];
-
-            for(let msg of messages.messages){
-
-                if(!msg?.message){
-                    await this.sock.waitForMessage(msg.key.id!);
-                    continue;
-                }
-
-                const contentType = getContentType(msg?.message);
-
-                if(!contentType){
-                    continue;
-                }
-
-                let timestamp = msg?.messageTimestamp;
-
-                if(timestamp && typeof timestamp === 'object' && typeof timestamp.toNumber === 'function'){
-                    timestamp = timestamp.toNumber();
-                }else if(timestamp && typeof timestamp === 'object' && 'low' in timestamp){
-                    timestamp = Number((timestamp as any).low) || 0;
-                }else if(typeof timestamp !== 'number'){
-                    timestamp = 0;
-                }
-
-                msg.messageTimestamp = timestamp;
-
-                (msg as any).messageType = contentType || undefined;
-
-                rawMessages.push(msg);
-            }
-
-            PrismaConnection.saveManyMessages(`${this.instance.owner}_${this.instance.instanceName}`, rawMessages);
-            await trySendWebhook("messages.upsert", this.instance, rawMessages);
+            const prepared = this.buildMessagesWithType(messages.messages);
+            PrismaConnection.saveManyMessages(`${this.instance.owner}_${this.instance.instanceName}`, prepared);
+            await trySendWebhook("messages.upsert", this.instance, prepared);
             
         });
 
