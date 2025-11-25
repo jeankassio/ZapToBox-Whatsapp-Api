@@ -65,12 +65,7 @@ export default class InstancesController {
 
             const status = instanceStatus.get(key);
 
-            if(!status){
-                return {
-                    success: false,
-                    error: "Error on get instance status",
-                };
-            }else if(status === "ONLINE"){
+            if(status && status === "ONLINE"){
                 return {
                     success: false,
                     error: "Instance is already connected",
