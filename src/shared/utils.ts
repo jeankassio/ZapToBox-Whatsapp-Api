@@ -6,7 +6,7 @@ import { ConnectionStatus, InstanceData, ProxyAgent, WebhookPayload } from './ty
 import path from "path";
 import UserConfig from "../infra/config/env"
 import { Worker } from 'worker_threads';
-import { getContentType, jidNormalizedUser } from "@whiskeysockets/baileys";
+import { jidNormalizedUser } from "@whiskeysockets/baileys";
 
 
 export async function removeInstancePath(instancePath: string){
@@ -60,9 +60,7 @@ function serializeData(data: any): any {
 
 export async function trySendWebhook(event: string, instance: InstanceData, data: any) {
 
-    const enrichedData = enrichMessagesWithType(data);
-
-    const payload = {
+    const payload: WebhookPayload = serializeData({
         event,
         instance: {
             instanceName: instance.instanceName,
@@ -71,9 +69,9 @@ export async function trySendWebhook(event: string, instance: InstanceData, data
             profilePictureUrl: instance.profilePictureUrl,
             instanceJid: jidNormalizedUser(instance.socket?.user?.id) || null 
         },
-        data: serializeData(enrichedData),
+        data,
         targetUrl: UserConfig.webhookUrl
-    };
+    });
 
     const worker = new Worker(path.join(__dirname, 'webhookWorker.js'));
     
@@ -81,8 +79,8 @@ export async function trySendWebhook(event: string, instance: InstanceData, data
     
     worker.on('message', async (result) => {
         if (!result.success) {
-            console.warn(`[${instance.owner}/${instance.instanceName}] Fail to send webhook ${event}, saving locally...`);
             if(UserConfig.useWebhookQueue){
+                console.warn(`[${instance.owner}/${instance.instanceName}] Fail to send webhook ${event}, saving locally...`);
                 await saveWebhookEvent(payload);
             }
         }
@@ -90,46 +88,12 @@ export async function trySendWebhook(event: string, instance: InstanceData, data
     });
 
     worker.on('error', async (err) => {
-        console.warn(`[${instance.owner}/${instance.instanceName}] Fail in webhook worker ${event}:`, err);
         if(UserConfig.useWebhookQueue){
+            console.warn(`[${instance.owner}/${instance.instanceName}] Fail in webhook worker ${event}:`, err);
             await saveWebhookEvent(payload);
         }
         worker.terminate();
     });
-}
-
-function enrichMessagesWithType(data: any) {
-
-    // Caso seja um objeto com `.messages`
-    if (data && Array.isArray(data)) {
-        data = data.map((m: any) => ({
-            ...m,
-            messageType: getSafeMessageType(m)
-        }));
-        return data;
-    }
-
-    if (Array.isArray(data)) {
-        return data.map(item => {
-            if (item && item.message) {
-                return {
-                    ...item,
-                    messageType: getSafeMessageType(item)
-                };
-            }
-            return item;
-        });
-    }
-
-    return data;
-}
-
-function getSafeMessageType(message: any): string | null {
-    try {
-        return getContentType(message.message) || null;
-    } catch {
-        return null;
-    }
 }
 
 async function ensureDir() {

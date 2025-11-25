@@ -1,4 +1,4 @@
-import {WAMessageKey, WASocket} from "@whiskeysockets/baileys";
+import {WAMessage, WAMessageKey, WASocket} from "@whiskeysockets/baileys";
 import { BlobOptions } from "buffer";
 
 export type ConnectionStatus = "ONLINE" | "OFFLINE" | "REMOVED";
@@ -9,6 +9,7 @@ export interface InstanceInfo {
   owner: string;
   connectionStatus: ConnectionStatus;
   profilePictureUrl?: string | undefined;
+  instanceJid?: string | null;
 }
 
 export interface InstanceData extends InstanceInfo{
@@ -27,8 +28,12 @@ export type InstanceCreated = {
 export interface WebhookPayload {
   event: string;
   instance: InstanceInfo;
-  data: any[];
+  data: WAMessage[];
   targetUrl: string;
+}
+
+export interface MessageWebhook extends WAMessage{
+  messageType?: string;
 }
 
 export interface ProxyAgent{
