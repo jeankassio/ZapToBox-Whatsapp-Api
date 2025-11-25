@@ -66,7 +66,6 @@ export default class MediaController {
                 }
 
             }catch(err){
-                console.error("Error downloading media message:", err);
                 return {
                     success: false,
                     error: "Error downloading media message.",
