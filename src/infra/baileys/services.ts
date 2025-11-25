@@ -230,9 +230,9 @@ export default class Instance{
                 
                 this.sock.sendPresenceUpdate('unavailable');
 
-                setTimeout(async () => {
-                    await trySendWebhook("connection.open", this.instance, update);
-                },2000);
+                await delay(2);
+
+                await trySendWebhook("connection.open", this.instance, update);
 
                 if (this.qrCodeResolver) {
                     this.qrCodeResolver('');
@@ -268,7 +268,7 @@ export default class Instance{
         this.sock.ev.on("messaging-history.set", async({messages, chats, contacts}: BaileysEventMap['messaging-history.set']) => {
 
             if(contacts && contacts.length > 0){
-                PrismaConnection.saveManyContacts(`${this.instance.owner}_${this.instance.instanceName}`, contacts);
+                await PrismaConnection.saveManyContacts(`${this.instance.owner}_${this.instance.instanceName}`, contacts);
                 await trySendWebhook("contacts.set", this.instance, contacts);
             }
 
@@ -310,7 +310,7 @@ export default class Instance{
                     });
                 }
 
-                PrismaConnection.saveManyMessages(`${this.instance.owner}_${this.instance.instanceName}`, messages);
+                await PrismaConnection.saveManyMessages(`${this.instance.owner}_${this.instance.instanceName}`, messages);
                 trySendWebhook("messages.set", this.instance, rawMessages);
             }
 
@@ -337,12 +337,12 @@ export default class Instance{
         });
 
         this.sock.ev.on("contacts.upsert", async (contacts: BaileysEventMap['contacts.upsert']) => {
-            PrismaConnection.saveManyContacts(`${this.instance.owner}_${this.instance.instanceName}`, contacts);
+            await PrismaConnection.saveManyContacts(`${this.instance.owner}_${this.instance.instanceName}`, contacts);
             await trySendWebhook("contacts.upsert", this.instance, contacts);
         });
 
         this.sock.ev.on("contacts.update", async (contacts: BaileysEventMap['contacts.update']) => {
-            PrismaConnection.saveManyContacts(`${this.instance.owner}_${this.instance.instanceName}`, contacts);
+            await PrismaConnection.saveManyContacts(`${this.instance.owner}_${this.instance.instanceName}`, contacts);
             await trySendWebhook("contacts.update", this.instance, contacts);
         });
 
@@ -382,7 +382,7 @@ export default class Instance{
                 });
             }
 
-            PrismaConnection.saveManyMessages(`${this.instance.owner}_${this.instance.instanceName}`, messages.messages);
+            await PrismaConnection.saveManyMessages(`${this.instance.owner}_${this.instance.instanceName}`, messages.messages);
             await trySendWebhook("messages.upsert", this.instance, rawMessages);
             
         });
