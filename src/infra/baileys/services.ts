@@ -263,10 +263,15 @@ export default class Instance{
             }
         });
 
-        this.sock.ev.on("messaging-history.set", async({messages, chats}: BaileysEventMap['messaging-history.set']) => {
+        this.sock.ev.on("messaging-history.set", async({messages, chats, contacts}: BaileysEventMap['messaging-history.set']) => {
+
+            if(contacts && contacts.length > 0){
+                PrismaConnection.saveManyContacts(`${this.instance.owner}_${this.instance.instanceName}`, contacts);
+                await trySendWebhook("contacts.set", this.instance, contacts);
+            }
 
             if(chats && chats.length > 0){
-                trySendWebhook("chats.set", this.instance, chats);
+                await trySendWebhook("chats.set", this.instance, chats);
             }
 
             if(messages && messages.length > 0){
