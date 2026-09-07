@@ -1,15 +1,6 @@
-import { instanceStatus } from "../../shared/constants";
-import { ConnectionStatus } from "../../shared/types";
-import { startWebhookRetryLoop } from "../../shared/utils";
+import { webhookOutbox } from "../../shared/utils.js";
 
-export default class Queue{
-
-    async start(){
-        startWebhookRetryLoop(this.getInstanceStatus);
-    }
-
-    getInstanceStatus(name: string): ConnectionStatus{
-        return instanceStatus.get(name) || "OFFLINE";
-    }
-
+export default class Queue {
+  start(): void { webhookOutbox.start(); }
+  async stop(): Promise<void> { await webhookOutbox.stop(); }
 }

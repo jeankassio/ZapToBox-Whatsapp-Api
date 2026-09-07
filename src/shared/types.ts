@@ -28,8 +28,10 @@ export type InstanceCreated = {
 export interface WebhookPayload {
   event: string;
   instance: InstanceInfo;
-  data: WAMessage[];
+  data: unknown;
   targetUrl: string;
+  id?: string;
+  timestamp?: string;
 }
 
 export interface MessageWebhook extends WAMessage{
@@ -45,6 +47,7 @@ export interface Contact{
   id?: string;
   name?: string;
   lid?: string;
+  phoneNumber?: string;
 }
 
 export interface ForwardMessage{

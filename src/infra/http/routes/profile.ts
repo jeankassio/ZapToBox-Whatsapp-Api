@@ -1,215 +1,26 @@
-import express, { Request, Response } from "express";
-import ProfileController from "../controllers/profile";
+import { Router } from 'express';
+import ProfileController from '../controllers/profile.js';
+import { isMediaUrl } from '../../../shared/guards.js';
+import { RequestError } from '../controllers/base.js';
+import { jid, scopedRoute, text } from './helpers.js';
 
-export default class ProfileRoutes{
-
-    private router = express.Router();
-
-    get(){
-        
-        this.router
-            .post("/onWhatsapp/:owner/:instanceName", async (req: Request, res: Response) => {
-
-                const owner = req.params.owner;
-                const instanceName = req.params.instanceName;
-
-                if(!owner || !instanceName){
-                    return res.status(400).json({ error: "Owner and instanceName are required." });
-                }
-
-                const { id } = req.body;
-
-                if(!id){
-                    return res.status(400).json({ error: "Field 'id' is required." });
-                }
-
-                const profileController = new ProfileController(owner, instanceName);
-                const result = await profileController.onWhatsapp(id);
-
-                if(result?.error){
-                    return res.status(500).json(result);
-                }else{
-                    return res.status(200).json(result);
-                }
-
-            })
-            .post("/fetchStatus/:owner/:instanceName", async(req: Request, res: Response) => {
-
-                const owner = req.params.owner;
-                const instanceName = req.params.instanceName;
-
-                if(!owner || !instanceName){
-                    return res.status(400).json({ error: "Owner and instanceName are required." });
-                }
-
-                const { remoteJid } = req.body;
-
-                if(!remoteJid){
-                    return res.status(400).json({ error: "Field 'remoteJid' is required." });
-                }
-
-                const profileController = new ProfileController(owner, instanceName);
-                const result = await profileController.fetchStatus(remoteJid);
-
-                if(result?.error){
-                    return res.status(500).json(result);
-                }else{
-                    return res.status(200).json(result);
-                }
-
-            })
-            .post("/fetchProfilePicture/:owner/:instanceName", async(req: Request, res: Response) => {
-
-                const owner = req.params.owner;
-                const instanceName = req.params.instanceName;
-
-                if(!owner || !instanceName){
-                    return res.status(400).json({ error: "Owner and instanceName are required." });
-                }
-
-                const { remoteJid } = req.body;
-
-                if(!remoteJid){
-                    return res.status(400).json({ error: "Field 'remoteJid' is required." });
-                }
-
-                const profileController = new ProfileController(owner, instanceName);
-                const result = await profileController.fetchProfilePicture(remoteJid);
-
-                if(result?.error){
-                    return res.status(500).json(result);
-                }else{
-                    return res.status(200).json(result);
-                }
-
-            })
-            .post("/fetchBusinessProfile/:owner/:instanceName", async(req: Request, res: Response) => {
-
-                const owner = req.params.owner;
-                const instanceName = req.params.instanceName;
-
-                if(!owner || !instanceName){
-                    return res.status(400).json({ error: "Owner and instanceName are required." });
-                }
-
-                const { remoteJid } = req.body;
-
-                if(!remoteJid){
-                    return res.status(400).json({ error: "Field 'remoteJid' is required." });
-                }
-
-                const profileController = new ProfileController(owner, instanceName);
-                const result = await profileController.fetchBusinessProfile(remoteJid);
-
-                if(result?.error){
-                    return res.status(500).json(result);
-                }else{
-                    return res.status(200).json(result);
-                }
-
-            })
-            .post("/presenceSubscribe/:owner/:instanceName", async(req: Request, res: Response) => {
-
-                const owner = req.params.owner;
-                const instanceName = req.params.instanceName;
-
-                if(!owner || !instanceName){
-                    return res.status(400).json({ error: "Owner and instanceName are required." });
-                }
-
-                const { remoteJid } = req.body;
-
-                if(!remoteJid){
-                    return res.status(400).json({ error: "Field 'remoteJid' is required." });
-                }
-
-                const profileController = new ProfileController(owner, instanceName);
-                const result = await profileController.presenceSubscribe(remoteJid);
-
-                if(result?.error){
-                    return res.status(500).json(result);
-                }else{
-                    return res.status(200).json(result);
-                }
-
-            })
-            .patch("/profileName/:owner/:instanceName", async(req: Request, res: Response) => {
-
-                const owner = req.params.owner;
-                const instanceName = req.params.instanceName;
-
-                if(!owner || !instanceName){
-                    return res.status(400).json({ error: "Owner and instanceName are required." });
-                }
-
-                const { name } = req.body;
-
-                if(!name){
-                    return res.status(400).json({ error: "Field 'name' is required." });
-                }
-
-                const profileController = new ProfileController(owner, instanceName);
-                const result = await profileController.profileName(name);
-
-                if(result?.error){
-                    return res.status(500).json(result);
-                }else{
-                    return res.status(200).json(result);
-                }
-
-            })
-            .patch("/profileStatus/:owner/:instanceName", async(req: Request, res: Response) => {
-
-                const owner = req.params.owner;
-                const instanceName = req.params.instanceName;
-
-                if(!owner || !instanceName){
-                    return res.status(400).json({ error: "Owner and instanceName are required." });
-                }
-
-                const { status } = req.body;
-
-                if(!status){
-                    return res.status(400).json({ error: "Field 'status' is required." });
-                }
-
-                const profileController = new ProfileController(owner, instanceName);
-                const result = await profileController.profileStatus(status);
-
-                if(result?.error){
-                    return res.status(500).json(result);
-                }else{
-                    return res.status(200).json(result);
-                }
-
-            })
-            .put("/profilePicture/:owner/:instanceName", async(req: Request, res: Response) => {
-
-                const owner = req.params.owner;
-                const instanceName = req.params.instanceName;
-
-                if(!owner || !instanceName){
-                    return res.status(400).json({ error: "Owner and instanceName are required." });
-                }
-
-                const { jid, url } = req.body;
-
-                if(!jid){
-                    return res.status(400).json({ error: "Fields 'jid', 'url' and 'active' is required." });
-                }
-
-                const profileController = new ProfileController(owner, instanceName);
-                const result = await (url ? profileController.updateProfilePicture(jid, url) : profileController.removeProfilePicture(jid));
-
-                if(result?.error){
-                    return res.status(500).json(result);
-                }else{
-                    return res.status(200).json(result);
-                }
-
-            })
-        return this.router;
-
-    }
-
+export default class ProfileRoutes {
+  private readonly router = Router();
+  constructor(factory = (owner: string, name: string) => new ProfileController(owner, name)) {
+    scopedRoute(this.router, 'post', '/onWhatsapp', ({ owner, name, body }) => factory(owner, name).onWhatsapp(jid(body.id ?? body.remoteJid, 'id')));
+    scopedRoute(this.router, 'post', '/fetchStatus', ({ owner, name, body }) => factory(owner, name).fetchStatus(jid(body.remoteJid)));
+    scopedRoute(this.router, 'post', '/fetchProfilePicture', ({ owner, name, body }) => factory(owner, name).fetchProfilePicture(jid(body.remoteJid)));
+    scopedRoute(this.router, 'post', '/fetchBusinessProfile', ({ owner, name, body }) => factory(owner, name).fetchBusinessProfile(jid(body.remoteJid)));
+    scopedRoute(this.router, 'post', '/presenceSubscribe', ({ owner, name, body }) => factory(owner, name).presenceSubscribe(jid(body.remoteJid)));
+    scopedRoute(this.router, 'patch', '/profileName', ({ owner, name, body }) => factory(owner, name).profileName(text(body.name, 'name', 25)));
+    scopedRoute(this.router, 'patch', '/profileStatus', ({ owner, name, body }) => factory(owner, name).profileStatus(text(body.status, 'status', 139, true)));
+    scopedRoute(this.router, 'put', '/profilePicture', ({ owner, name, body }) => {
+      const remoteJid = jid(body.jid ?? body.remoteJid);
+      const controller = factory(owner, name);
+      if (body.url === undefined || body.url === null || body.url === '') return controller.removeProfilePicture(remoteJid);
+      if (!isMediaUrl(body.url)) throw new RequestError(400, 'Invalid image URL.');
+      return controller.updateProfilePicture(remoteJid, body.url);
+    });
+  }
+  get() { return this.router; }
 }

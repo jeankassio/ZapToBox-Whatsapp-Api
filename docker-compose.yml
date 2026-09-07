@@ -1,67 +1,47 @@
-version: "3.9"
-
 services:
   app:
     build: .
-    container_name: zaptobox_api
-    restart: always
+    restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3001:3001"
     environment:
-      - NODE_ENV=production
-      
-      - DATABASE_URL="postgresql://username:password@localhost:5432/dbname?schema=public"
-
-      - SESSION_FOLDER_NAME=sessions
-
-      - PORT=3000
-
-      - QRCODE_LIMIT=5
-      - QRCODE_TIMEOUT=20
-
-      - JWT_TOKEN=yourtokensecurehere123456789
-
-      - WEBHOOK_URL=http://localhost:8443/webhook
-
-      - SESSION=Linux
-      - PHONE_NAME=Edge
-
-      - PROXY_URL=
-
-      - WEBHOOK_QUEUE_DIR=./webhook-queue
-      - QUEUE_INTERVAL=5
-
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3001
+      DATABASE_URL: postgresql://${POSTGRES_USER:-zaptobox}:${POSTGRES_PASSWORD:?Defina POSTGRES_PASSWORD no .env}@db:5432/${POSTGRES_DB:-zaptobox}?schema=public
+      JWT_TOKEN: ${JWT_TOKEN:?Defina JWT_TOKEN no .env}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:?Defina WEBHOOK_SECRET no .env}
+      WEBHOOK_URL: ${DOCKER_WEBHOOK_URL:-http://host.docker.internal:3000/api/webhooks/whatsapp}
+      AUTH_STORE: database
+      SESSION_FOLDER_NAME: sessions
+      WEBHOOK_QUEUE: "true"
+      WEBHOOK_QUEUE_DIR: ./webhook-queue
+      QUEUE_INTERVAL: ${QUEUE_INTERVAL:-0.1}
+      SESSION: ${SESSION:-Linux}
+      PHONE_NAME: ${PHONE_NAME:-Desktop}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
-      - ./sessions:/zaptobox/sessions
+      - sessions:/zaptobox/sessions
+      - webhooks:/zaptobox/webhook-queue
     depends_on:
       db:
         condition: service_healthy
-    networks:
-      - zaptobox_network
-
   db:
-    image: postgres:16
-    container_name: zaptobox_db
-    restart: always
+    image: postgres:16-bookworm
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: zaptobox
+      POSTGRES_USER: ${POSTGRES_USER:-zaptobox}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Defina POSTGRES_PASSWORD no .env}
+      POSTGRES_DB: ${POSTGRES_DB:-zaptobox}
     volumes:
       - pgdata:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U admin -d zaptobox"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-zaptobox} -d ${POSTGRES_DB:-zaptobox}"]
       interval: 10s
       timeout: 5s
       retries: 5
-    networks:
-      - zaptobox_network
-
 volumes:
   pgdata:
-
-networks:
-  zaptobox_network:
-    driver: bridge
+  sessions:
+  webhooks:

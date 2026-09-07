@@ -1,39 +1,36 @@
-import express from "express";
-import Token from "./infra/state/auth";
-import InstanceRoutes from "./infra/http/routes/instances";
-import MessageRoutes from "./infra/http/routes/messages";
-import UserConfig from "./infra/config/env";
-import Sessions from "./infra/state/sessions";
-import Queue from "./infra/webhook/queue";
-import MediaRoutes from "./infra/http/routes/media";
-import ChatRoutes from "./infra/http/routes/chat";
-import GroupRoutes from "./infra/http/routes/group";
-import ProfileRoutes from "./infra/http/routes/profile";
-import PrivacyRoutes from "./infra/http/routes/privacy";
+import { createApp } from "./app.js";
+import UserConfig from "./infra/config/env.js";
+import Sessions from "./infra/state/sessions.js";
+import Queue from "./infra/webhook/queue.js";
+import { prisma } from "./core/connection/prisma.js";
 
-async function bootstrap(){
-
-    const app = express();
-    app.use(express.json());
-
-    app.use((req, res, next) => {
-        (new Token).verify(req, res, next);
-    });
-
-    app.use("/instances/", (new InstanceRoutes).get());
-    app.use("/messages/", (new MessageRoutes).get());
-    app.use("/media/", (new MediaRoutes).get());
-    app.use("/chat/", (new ChatRoutes).get());
-    app.use("/group/", (new GroupRoutes).get());
-    app.use("/profile/", (new ProfileRoutes).get());
-    app.use("/privacy/", (new PrivacyRoutes).get());
-
-    app.listen(UserConfig.portConfig, async () => {
-        await (new Sessions).start();
-        (new Queue).start();
-        console.log(`Server running in port ${UserConfig.portConfig}`);
-    });
-
+async function bootstrap():Promise<void> {
+  UserConfig.validate();
+  await prisma.$connect();
+  let ready=false,closing=false;
+  const app=createApp({ready:async()=>{if(!ready)throw new Error('Starting');await prisma.$queryRawUnsafe('SELECT 1');}});
+  const server=app.listen(Number(UserConfig.portConfig),UserConfig.host);
+  const queue=new Queue(),sessions=new Sessions();
+  const shutdown=async()=>{
+    if(closing)return;closing=true;ready=false;
+    const timeout=setTimeout(()=>{console.error('Shutdown timed out');process.exit(1);},25_000);timeout.unref();
+    try {
+      // Finish accepted HTTP operations before closing their sockets and persistence.
+      await new Promise<void>(resolve=>{server.close(()=>resolve());server.closeIdleConnections();});
+      await sessions.shutdown();await queue.stop();await prisma.$disconnect();
+    } finally {clearTimeout(timeout);}
+  };
+  const signal=()=>{void shutdown().catch(()=>{console.error('Shutdown failed');process.exitCode=1;});};
+  process.once('SIGINT',signal);process.once('SIGTERM',signal);
+  try {
+    await new Promise<void>((resolve,reject)=>{server.once('listening',resolve);server.once('error',reject);});
+    queue.start();
+    console.log('ZapToBox WhatsApp API listening on ' + UserConfig.host + ':' + UserConfig.portConfig);
+    await sessions.start();
+    if(!closing)ready=true;
+  } catch(error) {await shutdown();throw error;}
 }
-
-bootstrap();
+bootstrap().catch(async error=>{
+  console.error('API startup failed:',error instanceof Error?error.message:'Unknown error');
+  await prisma.$disconnect();process.exitCode=1;
+});

@@ -46,3 +46,15 @@ model Chat {
   @@unique([instance, jid], name: "instance_chat_jid")
   @@index([instance])
 }
+
+// Credentials and all Signal key categories are persisted before Baileys proceeds.
+model AuthState {
+  instance  String
+  type      String
+  key       String
+  value     Json
+  updatedAt DateTime @updatedAt
+
+  @@id([instance, type, key], name: "instance_type_key")
+  @@index([instance])
+}

@@ -1,19 +1,46 @@
 import dotenv from "dotenv";
-dotenv.config({quiet: true});
+dotenv.config({ quiet: true });
 
-export default class UserConfig{
+function numberEnv(name: string, fallback: number, min: number, max: number): number {
+  const value = Number(process.env[name] ?? fallback);
+  if (!Number.isFinite(value) || value < min || value > max) throw new Error('Invalid ' + name);
+  return value;
+}
 
-    static sessionFolderName: string = process.env.SESSION_FOLDER_NAME || "sessions";
-    static portConfig: string = process.env.PORT || "3000";
-    static jwtToken: string = process.env.JWT_TOKEN || "";
-    static webhookUrl: string  = process.env.WEBHOOK_URL || "https://localhost";
-    static sessionClient: string = process.env.SESSION || "Linux";
-    static sessionName: string = process.env.PHONE_NAME || "Edge";
-    static proxyUrl: (string | undefined) = process.env.PROXY_URL;
-    static useWebhookQueue: boolean = (process.env.WEBHOOK_QUEUE === 'true');
-    static webhook_queue_dir: string = process.env.WEBHOOK_QUEUE_DIR || "./webhook";
-    static webhook_interval: number = (Number(process.env.QUEUE_INTERVAL) * 60 * 1000) || 5 * 60 * 1000;
-    static qrCodeLimit: number = Number(process.env.QRCODE_LIMIT || 5);
-    static qrCodeTimeout: number = Number(process.env.QRCODE_TIMEOUT || 20);
+export default class UserConfig {
+  static sessionFolderName = process.env.SESSION_FOLDER_NAME || "sessions";
+  static portConfig = String(numberEnv("PORT", 3001, 1, 65535));
+  static host = process.env.HOST || "127.0.0.1";
+  static jwtToken = process.env.JWT_TOKEN || "";
+  static webhookUrl = process.env.WEBHOOK_URL || "";
+  static webhookSecret = process.env.WEBHOOK_SECRET || "";
+  static sessionClient = process.env.SESSION || "Linux";
+  static sessionName = process.env.PHONE_NAME || "Desktop";
+  static proxyUrl = process.env.PROXY_URL || undefined;
+  static useWebhookQueue = process.env.WEBHOOK_QUEUE !== "false";
+  static webhook_queue_dir = process.env.WEBHOOK_QUEUE_DIR || "./webhook-queue";
+  // QUEUE_INTERVAL retains the original unit: minutes.
+  static webhook_interval = numberEnv("QUEUE_INTERVAL", 0.1, 0.01, 1440) * 60_000;
+  static webhookTimeoutMs = numberEnv("WEBHOOK_TIMEOUT_MS", 10_000, 100, 60_000);
+  static webhookMaxAttempts = numberEnv("WEBHOOK_MAX_ATTEMPTS", 30, 1, 1000);
+  static webhookConcurrency = numberEnv("WEBHOOK_CONCURRENCY", 4, 1, 32);
+  static qrCodeLimit = numberEnv("QRCODE_LIMIT", 5, 1, 100);
+  static qrCodeTimeout = numberEnv("QRCODE_TIMEOUT", 20, 5, 120);
+  static authStore = process.env.AUTH_STORE || "database";
+  static bodyLimit = process.env.HTTP_BODY_LIMIT || "16mb";
 
+  static validate(): void {
+    if (this.jwtToken.length < 32 || /^(yourtoken|change[-_]?me|replace[-_]?me)/i.test(this.jwtToken)) {
+      throw new Error("Set JWT_TOKEN to a random secret with at least 32 characters");
+    }
+    if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required");
+    if (!["database", "filesystem"].includes(this.authStore)) throw new Error("Invalid AUTH_STORE");
+    if (this.webhookUrl) {
+      const url = new URL(this.webhookUrl);
+      if (!["https:", "http:"].includes(url.protocol) || url.username || url.password || url.hash) {
+        throw new Error("WEBHOOK_URL must be an HTTP(S) URL without credentials or fragment");
+      }
+      if (this.webhookSecret.length < 32) throw new Error("WEBHOOK_SECRET must have at least 32 characters");
+    }
+  }
 }

@@ -1,182 +1,64 @@
-import * as fs from "fs";
-import { HttpsProxyAgent } from 'https-proxy-agent';
-import { SocksProxyAgent } from 'socks-proxy-agent';
-import { ProxyAgent as UndiciProxyAgent } from 'undici';
-import { ConnectionStatus, InstanceData, ProxyAgent, WebhookPayload } from './types';
-import path from "path";
-import UserConfig from "../infra/config/env"
-import { Worker } from 'worker_threads';
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import { HttpsProxyAgent } from "https-proxy-agent";
+import { SocksProxyAgent } from "socks-proxy-agent";
 import { jidNormalizedUser } from "@whiskeysockets/baileys";
+import type { InstanceData, ProxyAgent } from "./types.js";
+import UserConfig from "../infra/config/env.js";
+import { WebhookOutbox } from "../infra/webhook/outbox.js";
+import { stringify } from "./serialization.js";
 
+export const webhookOutbox = new WebhookOutbox({
+  directory:UserConfig.webhook_queue_dir,url:UserConfig.webhookUrl,secret:UserConfig.webhookSecret,
+  timeoutMs:UserConfig.webhookTimeoutMs,maxAttempts:UserConfig.webhookMaxAttempts,
+  concurrency:UserConfig.webhookConcurrency,retryMs:UserConfig.webhook_interval,durable:UserConfig.useWebhookQueue,
+});
 
-export async function removeInstancePath(instancePath: string){
-
-    fs.rmSync(instancePath, { recursive: true, force: true });
-
+export async function removeInstancePath(instancePath:string): Promise<void> {
+  const base = path.resolve(UserConfig.sessionFolderName);
+  const target = path.resolve(instancePath);
+  const relative = path.relative(base,target);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || relative.split(path.sep).length !== 2) throw new Error('Invalid instance path');
+  // Reject symlink/junction parents before any recursive removal.
+  const realBase = await fs.realpath(base).catch(()=>base);
+  const realParent = await fs.realpath(path.dirname(target)).catch(()=>path.dirname(target));
+  const parentRelative = path.relative(realBase,realParent);
+  if (!parentRelative || parentRelative.startsWith('..') || path.isAbsolute(parentRelative)) throw new Error('Invalid session parent');
+  const stat = await fs.lstat(target).catch(error=>{if(error.code==='ENOENT')return undefined;throw error;});
+  if (stat?.isSymbolicLink()) throw new Error('Session symlinks are not supported');
+  await fs.rm(target,{recursive:true,force:true});
 }
 
-export async function genProxy(wppProxy?: string): Promise<ProxyAgent>{
+export async function genProxy(proxy?:string): Promise<ProxyAgent> {
+  if (!proxy) return {};
+  const protocol = new URL(proxy).protocol;
+  if (protocol === 'http:' || protocol === 'https:') {
+    const agent = new HttpsProxyAgent(proxy);
+    return {wsAgent:agent,fetchAgent:agent};
+  }
+  if (['socks:','socks4:','socks5:'].includes(protocol)) {
+    const agent = new SocksProxyAgent(proxy);
+    return {wsAgent:agent,fetchAgent:agent};
+  }
+  throw new Error('Unsupported PROXY_URL protocol');
+}
 
-    const proxys: ProxyAgent = {};
-
-    if(!wppProxy){
-        return proxys;
+export async function trySendWebhook(event:string,instance:InstanceData,data:unknown): Promise<void> {
+  const info = {
+    owner:instance.owner,instanceName:instance.instanceName,connectionStatus:instance.connectionStatus,
+    profilePictureUrl:instance.profilePictureUrl,
+    instanceJid:jidNormalizedUser(instance.socket?.user?.id ?? instance.instanceJid ?? '') || null,
+  };
+  // History can contain thousands of entries; the Back accepts at most 1000 per request.
+  if(Array.isArray(data) && data.length) {
+    let batch:unknown[]=[];let bytes=0;
+    for(const entry of data) {
+      const size=Buffer.byteLength(stringify(entry));
+      if(batch.length && (batch.length>=500 || bytes+size>8_000_000)) {
+        await webhookOutbox.enqueue(event,info,batch);batch=[];bytes=0;
+      }
+      batch.push(entry);bytes+=size;
     }
-
-    const isProtocol = (url: string) => url.split(":")[0]?.toLowerCase();
-
-        const protocol = isProtocol(wppProxy);
-
-        switch(protocol){
-            case 'http':
-            case 'https':{
-                proxys.wsAgent = new HttpsProxyAgent(wppProxy);
-                break;
-            }
-            case 'socks':
-            case 'socks4':
-            case 'socks5':{
-                proxys.wsAgent = new SocksProxyAgent(wppProxy);
-                break;
-            }
-            default:{
-                console.warn(`Unknown Protocol in Proxy: ${wppProxy}`);
-            }
-        }
-
-        proxys.fetchAgent = new UndiciProxyAgent(wppProxy);
-
-    return proxys;
-}
-
-function serializeData(data: any): any {
-    try {
-        return JSON.parse(JSON.stringify(data));
-    } catch (err) {
-        console.warn('Failed to serialize data, returning empty object:', err);
-        return {};
-    }
-}
-
-export async function trySendWebhook(event: string, instance: InstanceData, data: any) {
-
-    const payload: WebhookPayload = serializeData({
-        event,
-        instance: {
-            instanceName: instance.instanceName,
-            owner: instance.owner,
-            connectionStatus: instance.connectionStatus,
-            profilePictureUrl: instance.profilePictureUrl,
-            instanceJid: jidNormalizedUser(instance.socket?.user?.id) || null 
-        },
-        data,
-        targetUrl: UserConfig.webhookUrl
-    });
-
-    const worker = new Worker(path.join(__dirname, 'webhookWorker.js'));
-    
-    worker.postMessage(payload);
-    
-    worker.on('message', async (result) => {
-        if (!result.success) {
-            if(UserConfig.useWebhookQueue){
-                console.warn(`[${instance.owner}/${instance.instanceName}] Fail to send webhook ${event}, saving locally...`);
-                await saveWebhookEvent(payload);
-            }
-        }
-        worker.terminate();
-    });
-
-    worker.on('error', async (err) => {
-        if(UserConfig.useWebhookQueue){
-            console.warn(`[${instance.owner}/${instance.instanceName}] Fail in webhook worker ${event}:`, err);
-            await saveWebhookEvent(payload);
-        }
-        worker.terminate();
-    });
-}
-
-async function ensureDir() {
-    try {
-        await fs.promises.mkdir(UserConfig.webhook_queue_dir, { recursive: true });
-    } catch (err) {
-        console.error("Error creating webhook directory:", err);
-    }
-}
-
-export async function saveWebhookEvent(payload: WebhookPayload) {
-    try {
-        await ensureDir();
-        const filename = `${payload.instance.instanceName}-${Date.now()}.json`;
-        const filePath = path.join(UserConfig.webhook_queue_dir, filename);
-        await fs.promises.writeFile(filePath, JSON.stringify(payload, null, 2), "utf8");
-    } catch (err) {
-        console.error("Error saving webhook:", err);
-    }
-}
-
-export async function processWebhookQueue(getInstanceStatus: (name: string) => ConnectionStatus) {
-    try {
-        await ensureDir();
-        const files = await fs.promises.readdir(UserConfig.webhook_queue_dir);
-
-        for (const file of files) {
-            const filePath = path.join(UserConfig.webhook_queue_dir, file);
-            const raw = await fs.promises.readFile(filePath, "utf8");
-            const payload: WebhookPayload = JSON.parse(raw);
-
-            const status = getInstanceStatus(payload.instance.instanceName);
-
-            if(status !== "ONLINE"){
-                if(status === "REMOVED"){
-                    await fs.promises.unlink(filePath);
-                }
-                continue;
-            }
-
-            // Usa worker para reenviar webhook
-            const worker = new Worker(path.join(__dirname, 'webhookWorker.js'));
-            
-            worker.postMessage(payload);
-            
-            worker.on('message', async (result) => {
-                if (result.success) {
-                    await fs.promises.unlink(filePath);
-                } else {
-                    console.warn(`Fail to resend webhook ${file}: ${result.error}`);
-                }
-                worker.terminate();
-            });
-
-            worker.on('error', async (err) => {
-                console.warn(`Error trying to resend webhook ${file}:`, err.message);
-                worker.terminate();
-            });
-        }
-    } catch (err) {
-        console.error("Error processing webhook queue:", err);
-    }
-}
-
-export async function clearInstanceWebhooks(instanceName: string) {
-    try {
-        
-        await ensureDir();
-        const files = await fs.promises.readdir(UserConfig.webhook_queue_dir);
-        const related = files.filter(f => f.startsWith(`${instanceName}-`));
-
-        for (const file of related) {
-            await fs.promises.unlink(path.join(UserConfig.webhook_queue_dir, file));
-        }
-    } catch (err) {
-        console.error(`Error removing webhooks for instance ${instanceName}:`, err);
-    }
-}
-
-export function startWebhookRetryLoop(getInstanceStatus: (name: string) => "ONLINE" | "OFFLINE" | "REMOVED") {
-    if(UserConfig.useWebhookQueue){
-        setInterval(() => {
-            processWebhookQueue(getInstanceStatus);
-        }, UserConfig.webhook_interval);
-    }
+    if(batch.length)await webhookOutbox.enqueue(event,info,batch);
+  } else await webhookOutbox.enqueue(event,info,data);
 }

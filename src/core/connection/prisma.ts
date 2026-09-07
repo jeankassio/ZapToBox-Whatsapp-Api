@@ -1,180 +1,126 @@
 import { Prisma, PrismaClient } from "@prisma/client";
-import { JsonValue } from "@prisma/client/runtime/library";
-import { Contact } from "../../shared/types";
-import { WAMessage } from "@whiskeysockets/baileys";
-import { MessageMapper } from "../../infra/mappers/messageMapper";
-import { ContactMapper } from "../../infra/mappers/contactMapper";
+import type { WAMessage, WAMessageKey } from "@whiskeysockets/baileys";
+import type { Contact } from "../../shared/types.js";
+import { MessageMapper } from "../../infra/mappers/messageMapper.js";
+import { ContactMapper } from "../../infra/mappers/contactMapper.js";
+import { jsonValue, timestampBigInt } from "../../shared/serialization.js";
+
+export const prisma = new PrismaClient();
+const writes = new Map<string, Promise<unknown>>();
+async function serialized<T>(instance: string, work: () => Promise<T>): Promise<T> {
+  const prior = writes.get(instance) ?? Promise.resolve();
+  const next = prior.catch(() => {}).then(work);
+  writes.set(instance, next);
+  try { return await next; } finally { if (writes.get(instance) === next) writes.delete(instance); }
+}
 
 export default class PrismaConnection {
-
-    private static conn: PrismaClient =  new PrismaClient();;
-    
-    static async saveMessages(instance: string, msg: any): Promise<any> {
-
-        const key = msg.key;
-        
-        if(!key || !key.id){
-            return;
-        }
-
-        const updateData: any = {
-            content: msg,
-        };
-
-        if (msg.pushName !== undefined && msg.pushName !== null) updateData.pushName = msg.pushName;
-        if (msg?.status !== undefined && msg?.status !== null) updateData.status = msg.status.toString();
-        if (msg.messageTimestamp !== undefined && msg.messageTimestamp !== null) updateData.messageTimestamp = BigInt(msg.messageTimestamp);
-
-        return PrismaConnection.conn.message.upsert({
-            where: {
-                instance_messageId: {
-                    instance,
-                    messageId: key.id,
-                },
-            },
-            update: updateData,
-            create: {
-                instance,
-                messageId: key.id,
-                remoteJid: key.remoteJid!,
-                senderLid: key?.senderLid || null,
-                fromMe: !!key.fromMe,
-                pushName: msg.pushName || null,
-                content: msg,
-                status: msg?.status?.toString() || null,
-                messageTimestamp: BigInt(msg.messageTimestamp || 0),
-            },
-        });
-
+  private static async chatWhere(instance:string,remoteJid:string):Promise<Prisma.MessageWhereInput> {
+    const contact=await prisma.contact.findFirst({where:{instance,OR:[{jid:remoteJid},{lid:remoteJid}]}});
+    const aliases=[...new Set([remoteJid,contact?.jid,contact?.lid].filter((value):value is string=>!!value))];
+    return {instance,OR:[{remoteJid:{in:aliases}},...aliases.map(alias=>({content:{path:['key','remoteJidAlt'],equals:alias}}))]};
+  }
+  static async saveManyChats(instance:string, chats: {id:string;[key:string]:unknown}[]): Promise<void> {
+    await serialized(instance, async () => {
+      for (const chat of chats) {
+        if (!chat.id) continue;
+        const previous = await prisma.chat.findUnique({where:{instance_chat_jid:{instance,jid:chat.id}}});
+        const data = jsonValue<Prisma.InputJsonObject>({...previous?.data as object,...chat});
+        await prisma.chat.upsert({where:{instance_chat_jid:{instance,jid:chat.id}},create:{instance,jid:chat.id,data},update:{data}});
+      }
+    });
+  }
+  static async deleteChats(instance:string, ids:string[]): Promise<void> {
+    await serialized(instance, async()=>{await prisma.chat.deleteMany({where:{instance,jid:{in:ids}}});});
+  }
+  static async deleteMessages(instance:string, deletion:{keys?:WAMessageKey[];jid?:string;all?:boolean}): Promise<void> {
+    if (!instance) throw new Error("Instance is required");
+    await serialized(instance, async()=>{
+      if (deletion.all && deletion.jid) await prisma.message.deleteMany({where:await this.chatWhere(instance,deletion.jid)});
+      else if(deletion.keys?.length) {
+        const ids:string[]=[];
+        for (const key of deletion.keys) if(key.id && key.remoteJid && await this.getMessageById(key.id,instance,key.remoteJid)) ids.push(key.id);
+        await prisma.message.deleteMany({where:{instance,messageId:{in:ids}}});
+      }
+    });
+  }
+  static async saveMessages(instance: string, msg: WAMessage): Promise<unknown> {
+    if (!instance || !msg.key?.id || !msg.key.remoteJid) return;
+    return serialized(instance, async () => {
+      const previous = await prisma.message.findUnique({where:{instance_messageId:{instance,messageId:msg.key.id!}}});
+      const old = previous?.content as Record<string, unknown> | undefined;
+      const mergedKey={...(old?.key as object),...msg.key};
+      if(previous && previous.remoteJid!==msg.key.remoteJid && !mergedKey.remoteJidAlt) mergedKey.remoteJidAlt=previous.remoteJid;
+      const content = jsonValue<Prisma.InputJsonObject>({...old, ...msg, key:mergedKey});
+      const timestamp = msg.messageTimestamp != null ? timestampBigInt(msg.messageTimestamp) : (previous?.messageTimestamp ?? 0n);
+      const status = msg.status != null ? String(msg.status) : previous?.status ?? null;
+      return prisma.message.upsert({
+        where:{instance_messageId:{instance,messageId:msg.key.id!}},
+        update:{content,remoteJid:msg.key.remoteJid!, status, messageTimestamp:timestamp, ...(msg.pushName != null ? {pushName:msg.pushName}: {})},
+        create:{instance,messageId:msg.key.id!,remoteJid:msg.key.remoteJid!,senderLid:msg.key.participantAlt ?? msg.key.remoteJidAlt ?? null,
+          fromMe:!!msg.key.fromMe,pushName:msg.pushName ?? null,content,status,messageTimestamp:timestamp}
+      });
+    });
+  }
+  static async saveManyMessages(instance: string, msgs: WAMessage[]): Promise<void> {
+    for (const msg of msgs) await this.saveMessages(instance,msg);
+  }
+  static async saveContact(instance: string, contact: Contact & {phoneNumber?:string;notify?:string}): Promise<unknown> {
+    const id = contact.id;
+    const jid = id?.endsWith("@lid") ? contact.phoneNumber : (id ?? contact.phoneNumber);
+    const lid = id?.endsWith("@lid") ? id : contact.lid;
+    if (!jid && !lid) return;
+    return serialized(instance, () => prisma.$transaction(async tx => {
+      const rows = await tx.contact.findMany({where:{instance,OR:[...(jid?[{jid}]:[]),...(lid?[{lid}]:[])]}, orderBy:{id:"asc"}});
+      const found = rows[0];
+      const data = {instance,name:contact.name ?? contact.notify ?? found?.name ?? null,jid:jid ?? found?.jid ?? null,lid:lid ?? found?.lid ?? null};
+      if (found) {
+        if (rows.length > 1) await tx.contact.deleteMany({where:{instance,id:{in:rows.slice(1).map(row=>row.id)}}});
+        return tx.contact.update({where:{id:found.id},data});
+      }
+      return tx.contact.create({data});
+    }));
+  }
+  static async saveManyContacts(instance: string, contacts: Contact[]): Promise<void> {
+    for (const contact of contacts) await this.saveContact(instance,contact);
+  }
+  static async deleteByInstance(instance: string): Promise<Prisma.BatchPayload> {
+    return serialized(instance, () => prisma.$transaction(async tx => {
+      await tx.message.deleteMany({where:{instance}});
+      await tx.chat.deleteMany({where:{instance}});
+      return tx.contact.deleteMany({where:{instance}});
+    }));
+  }
+  static async getMessageByInstance(instance: string): Promise<Prisma.JsonValue[]> {
+    return (await prisma.message.findMany({where:{instance},orderBy:{messageTimestamp:"desc"}})).map(row=>row.content);
+  }
+  static async getMessageById(messageId: string, instance: string, remoteJid?:string): Promise<WAMessage | undefined> {
+    if (!instance || !messageId) return undefined;
+    const row = await prisma.message.findUnique({where:{instance_messageId:{instance,messageId}}});
+    if (!row) return undefined;
+    const msg = MessageMapper.toWAMessage(row);
+    if (remoteJid && row.remoteJid !== remoteJid && msg.key.remoteJidAlt !== remoteJid) {
+      const mapping = await prisma.contact.findFirst({where:{instance,OR:[{jid:remoteJid,lid:row.remoteJid},{lid:remoteJid,jid:row.remoteJid}]}});
+      if (!mapping) return undefined;
     }
-
-    static async saveManyMessages(instance: string, msgs: any[]): Promise<void>{
-
-        for(const msg of msgs){
-            await this.saveMessages(instance, msg);
-        }
-
-    }
-
-    static async saveContact(instance: string, contact: Contact): Promise<any> {
-        const { id, lid, name } = contact;
-
-        try{
-
-            const createData = {
-                instance,
-                name: name ?? null,
-                jid: id ?? null,
-                lid: lid ?? null,
-            };
-
-            const updateData: any = { instance };
-            
-            if (name !== undefined && name !== null) updateData.name = name;
-            if (id !== undefined && id !== null) updateData.jid = id;
-            if (lid !== undefined && lid !== null) updateData.lid = lid;
-
-            if(id){
-                return await PrismaConnection.conn.contact.upsert({
-                    where: {
-                        instance_jid: { instance, jid: id }
-                    },
-                    update: updateData,
-                    create: createData
-                });
-            }else if(lid){
-                return await PrismaConnection.conn.contact.upsert({
-                    where: {
-                        instance_lid: { instance, lid }
-                    },
-                    update: updateData,
-                    create: createData
-                });
-            }
-
-        }catch(err){
-            console.log(err);
-            return false;
-        }
-
-    }
-
-    static async saveManyContacts(instance: string, contacts: Contact[]): Promise<void>{
-        for(const contact of contacts){
-            await this.saveContact(instance, contact);
-        }
-    }
-
-    static async deleteByInstance(instance: string): Promise<Prisma.BatchPayload>{
-        await PrismaConnection.conn.message.deleteMany({
-            where: { instance },
-        });
-        await PrismaConnection.conn.chat.deleteMany({
-            where: { instance },
-        });
-        return await PrismaConnection.conn.contact.deleteMany({
-            where: { instance },
-        });
-    }
-
-    static async getMessageByInstance(instance: string): Promise<JsonValue[] | undefined> {
-        const allData = await PrismaConnection.conn.message.findMany({
-            where: { instance },
-            orderBy: { messageTimestamp: "desc" },
-        });
-        return await Promise.all(allData?.map(async (data) => data.content));
-    }
-
-    static async getMessageById(messageId: string): Promise<WAMessage | undefined> {
-        const allData = await PrismaConnection.conn.message.findFirst({
-            where: { messageId }
-        });
-
-        if(!allData){
-            return undefined;
-        }
-
-        return MessageMapper.toWAMessage(allData);
-
-    }
-    
-    static async getLastMessageByInstance(instance: string, remoteJid: string): Promise<WAMessage | undefined> {
-        const allData = await PrismaConnection.conn.message.findFirst({
-            where: { 
-                AND: [
-                    { instance },
-                    { remoteJid }
-                ]
-            },
-            orderBy: { messageTimestamp: "desc" },
-        });
-
-        if(!allData){
-            return undefined;
-        }
-
-        return MessageMapper.toWAMessage(allData);
-
-    }
-    
-    static async getContactById(instance: string, id: string): Promise<Contact | undefined> {
-        const allData = await PrismaConnection.conn.contact.findFirst({
-            where: { 
-                instance,
-                OR: [
-                    { jid: id },
-                    { lid: id }
-                ]
-            }
-        });
-
-        if(!allData){
-            return undefined;
-        }
-
-        return ContactMapper.toContact(allData);
-
-    }
-    
-
+    return msg;
+  }
+  static async getLastMessageByInstance(instance: string, remoteJid: string): Promise<WAMessage | undefined> {
+    const row = await prisma.message.findFirst({where:await this.chatWhere(instance,remoteJid),orderBy:[{messageTimestamp:"desc"},{id:"desc"}]});
+    return row ? MessageMapper.toWAMessage(row) : undefined;
+  }
+  static async getContactById(instance: string,id:string): Promise<Contact | undefined> {
+    const row = await prisma.contact.findFirst({where:{instance,OR:[{jid:id},{lid:id}]}});
+    return row ? ContactMapper.toContact(row) : undefined;
+  }
+  /** Caller must first rule out duplicate legacy owner_name keys in the session inventory. */
+  static async migrateLegacyInstanceKey(owner:string, name:string): Promise<void> {
+    const legacy = owner + "_" + name;
+    const instance = owner + "/" + name;
+    await prisma.$transaction(async tx => {
+      await tx.message.updateMany({where:{instance:legacy},data:{instance}});
+      await tx.contact.updateMany({where:{instance:legacy},data:{instance}});
+      await tx.chat.updateMany({where:{instance:legacy},data:{instance}});
+    });
+  }
 }

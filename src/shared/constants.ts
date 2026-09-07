@@ -1,15 +1,15 @@
 import path from "path";
-import { ConnectionStatus, InstanceData } from "./types";
-import Instance from "../infra/baileys/services";
-import UserConfig from "../infra/config/env";
+import { ConnectionStatus, InstanceData } from "./types.js";
+import type Instance from "../infra/baileys/services.js";
+import UserConfig from "../infra/config/env.js";
 import { BaileysEventMap } from "@whiskeysockets/baileys";
 
 export const SessionFolderName = UserConfig.sessionFolderName;
-export const sessionsPath = path.join(__dirname, "../..", SessionFolderName);
+export const sessionsPath = path.resolve(process.cwd(), SessionFolderName);
 
-export const instanceConnection: Record<string, InstanceData> = {};
+export const instanceConnection: Record<string, InstanceData> = Object.create(null);
 export const instanceStatus = new Map<string, ConnectionStatus>();
-export const instances: Record<string, Instance> = {};
+export const instances: Record<string, Instance> = Object.create(null);
 
 export const baileysEvents = [
     "creds.update",

@@ -1,58 +1,32 @@
-import * as fs from "fs";
-import path from "path";
-import { InstanceInfo } from "../../shared/types";
-import { instanceConnection, sessionsPath } from "../../shared/constants";
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import type { InstanceInfo } from "../../shared/types.js";
+import { instanceConnection, sessionsPath } from "../../shared/constants.js";
+import { instanceKey, validateIdentity } from "../../shared/identity.js";
+import UserConfig from "../../infra/config/env.js";
+import { listDatabaseSessions, safeSessionDirectory } from "../../infra/state/auth-state.js";
 
 export default class InstancesRepository {
-    
-    async list(ownerFilter?: string): Promise<InstanceInfo[]> {
-
-        const results: InstanceInfo[] = [];
-
-        if(!fs.existsSync(sessionsPath)){
-            return results;
-        }
-
-        const owners = (ownerFilter ? [ownerFilter] : await this.getOwnersPath(sessionsPath));
-
-        for(const owner of owners){
-
-            const ownerPath = path.join(sessionsPath, owner);
-
-            if(!fs.existsSync(ownerPath)){
-                continue;
-            }
-
-            const instancesDirs = await this.getOwnersPath(ownerPath);
-
-            for(const instanceName of instancesDirs){
-
-                const key = `${owner}_${instanceName}`;
-                const loaded = instanceConnection[key];
-
-                results.push({
-                    instanceName,
-                    owner,
-                    connectionStatus: loaded ? loaded.connectionStatus : "OFFLINE",
-                    profilePictureUrl: loaded ? loaded.profilePictureUrl : undefined
-                });
-
-            }
-
-        }
-
-        return results;
-
+  async list(ownerFilter?:string): Promise<InstanceInfo[]> {
+    if(ownerFilter !== undefined) validateIdentity(ownerFilter,'owner');
+    const known = new Map<string,{owner:string;instanceName:string}>();
+    if(UserConfig.authStore==='database') for(const pair of await listDatabaseSessions()) known.set(instanceKey(pair.owner,pair.instanceName),pair);
+    for(const owner of await this.getOwnersPath(sessionsPath)) {
+      if(ownerFilter && owner!==ownerFilter)continue;
+      for(const instanceName of await this.getOwnersPath(path.join(sessionsPath,owner))) {
+        try { await safeSessionDirectory(sessionsPath,owner,instanceName); known.set(instanceKey(owner,instanceName),{owner,instanceName}); } catch { /* Invalid legacy paths are never traversed. */ }
+      }
     }
-
-    async getOwnersPath(opath: string): Promise<string[]> {
-        return fs.readdirSync(opath).filter((f) => {
-            try{
-                return fs.statSync(path.join(opath, f)).isDirectory();
-            }catch{
-                return false;
-            }
-        });
-    }
-    
+    for(const item of Object.values(instanceConnection)) known.set(instanceKey(item.owner,item.instanceName),item);
+    return [...known].filter(([,pair])=>!ownerFilter || pair.owner===ownerFilter).map(([key,pair])=>{
+      const loaded=instanceConnection[key];
+      return {...pair,connectionStatus:loaded?.connectionStatus ?? 'OFFLINE',profilePictureUrl:loaded?.profilePictureUrl,instanceJid:loaded?.instanceJid ?? null};
+    });
+  }
+  async getOwnersPath(directory:string): Promise<string[]> {
+    try {return (await fs.readdir(directory,{withFileTypes:true})).filter(item=>{
+      if(!item.isDirectory() || item.isSymbolicLink())return false;
+      try {validateIdentity(item.name);return true;}catch{return false;}
+    }).map(item=>item.name);} catch(error) {if((error as NodeJS.ErrnoException).code==='ENOENT')return [];throw error;}
+  }
 }
