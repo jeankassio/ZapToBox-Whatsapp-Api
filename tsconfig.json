@@ -2,23 +2,30 @@
   "compilerOptions": {
     "rootDir": "./src",
     "outDir": "./dist",
-
-    "module": "CommonJS",
-    "target": "ES2020",
-    "types": ["node"],
-
+    "module": "NodeNext",
+    "target": "ES2023",
+    "types": [
+      "node"
+    ],
     "sourceMap": true,
     "declaration": true,
     "declarationMap": true,
-    
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
-    
     "strict": true,
     "verbatimModuleSyntax": false,
-    "moduleDetection": "auto",
+    "moduleDetection": "force",
     "skipLibCheck": true,
-    "esModuleInterop": true
+    "esModuleInterop": true,
+    "moduleResolution": "NodeNext"
   },
-    "exclude": ["node_modules", "dist", "./prisma.config.ts"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "tests",
+    "prisma.config.ts"
+  ],
+  "include": [
+    "src/**/*.ts"
+  ]
 }

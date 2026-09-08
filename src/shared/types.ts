@@ -28,8 +28,18 @@ export type InstanceCreated = {
 export interface WebhookPayload {
   event: string;
   instance: InstanceInfo;
-  data: WAMessage[];
+  data: unknown;
   targetUrl: string;
+  id?: string;
+  timestamp?: string;
+  history?: HistoryChunkMetadata;
+}
+
+export interface HistoryChunkMetadata {
+  runId: string;
+  startedAt: string;
+  batchId: string;
+  chunkId: string;
 }
 
 export interface MessageWebhook extends WAMessage{
@@ -45,6 +55,7 @@ export interface Contact{
   id?: string;
   name?: string;
   lid?: string;
+  phoneNumber?: string;
 }
 
 export interface ForwardMessage{
@@ -66,7 +77,9 @@ export interface TextMessage extends MentionUser{
 export interface LocationMessage{
   location: {
     degreesLatitude: number,
-    degreesLongitude: number
+    degreesLongitude: number,
+    name?: string,
+    address?: string
   }
 }
 
@@ -136,5 +149,6 @@ export interface DocumentMessage{
 export interface StickerMessage{
   sticker:{
     url: string
-  }
+  },
+  isAnimated?: boolean
 }

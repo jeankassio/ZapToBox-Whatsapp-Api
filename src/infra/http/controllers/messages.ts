@@ -1,319 +1,113 @@
-import { instances } from "../../../shared/constants";
-import { AudioMessage, ContactMessage, DocumentMessage, GifMessage, ImageMessage, LocationMessage, PollMessage, ReactionMessage, StatusPresence, StickerMessage, TextMessage, VideoMessage } from "../../../shared/types";
-import { AnyMessageContent, delay, MessageContentGenerationOptions, WAMessage, WAMessageKey, WASocket } from "@whiskeysockets/baileys";
-import PrismaConnection from "../../../core/connection/prisma";
-import { JsonObject } from "@prisma/client/runtime/library";
-
-export default class MessagesController {
-
-    private sock: WASocket | undefined;
-    private jid: string;
-    private delay: number | string;
-
-    constructor(owner: string, instanceName: string, jid: string, delay: (number | string)){
-        const key = `${owner}_${instanceName}`;
-        this.sock = instances[key]?.getSock();
-        this.jid = this.formatJid(jid);
-        this.delay = delay;
-    }
-
-    async filterOptions(rawOptions: JsonObject): Promise<MessageContentGenerationOptions>{
-
-        const options: any = {};
-
-        if(rawOptions?.quoted && typeof rawOptions.quoted == 'string'){
-
-            const quoted = await PrismaConnection.getMessageById(rawOptions.quoted);
-
-            if(quoted){
-                options.quoted = quoted;
-            }
-
-        }
-
-        return options;
-
-    }
-
-    async sendMessageText(message: TextMessage, rawOptions: JsonObject | undefined){
-
-        const options: MessageContentGenerationOptions | undefined = (rawOptions ? await this.filterOptions(rawOptions) : undefined);
-
-        return this.sendMessage(message, options);
-
-    }
-
-    
-    async sendMessageLocation(message: LocationMessage, rawOptions: JsonObject | undefined){
-
-        const options: MessageContentGenerationOptions | undefined = (rawOptions ? await this.filterOptions(rawOptions) : undefined);
-
-        return this.sendMessage(message, options);
-
-    }
-
-    
-    async sendMessageContact(message: ContactMessage, rawOptions: JsonObject | undefined){
-
-        const options: MessageContentGenerationOptions | undefined = (rawOptions ? await this.filterOptions(rawOptions) : undefined);
-
-        const vcard = 'BEGIN:VCARD\n'
-            + 'VERSION:3.0\n'
-            + `FN:${message.displayName}\n`
-            + 'ORG:ZapToBox Whatsapp Api;\n'
-            + `TEL;type=CELL;type=VOICE;waid=${message.waid}:${message.phoneNumber}\n`
-            + 'END:VCARD';
-
-        const contact: AnyMessageContent = {
-            contacts:{
-                displayName: message.displayName,
-                contacts: [{vcard}]
-            }
-        };
-
-        return this.sendMessage(contact, options);
-
-    }
-
-    async sendMessageReaction(reaction: ReactionMessage){
-
-        const options: undefined = undefined;
-
-        const messageReact = await PrismaConnection.getMessageById(reaction.messageId);
-
-        if(!messageReact){
-            return {
-                success: false,
-                error: "Failed to send message.",
-            };
-        }
-
-        const message:AnyMessageContent = {
-            react:{
-                text: reaction.emoji,
-                key: messageReact.key
-            }
-        };
-
-        return this.sendMessage(message, options);
-
-    }
-
-    async sendMessagePoll(message: PollMessage, rawOptions: JsonObject | undefined){
-
-        const options: undefined = undefined;
-
-        return this.sendMessage(message, options);
-
-    }
-
-    async sendMessageImage(message: ImageMessage, rawOptions: JsonObject | undefined){
-
-        const options: MessageContentGenerationOptions | undefined = (rawOptions ? await this.filterOptions(rawOptions) : undefined);
-
-        return this.sendMessage(message, options);
-
-    }
-
-    async sendMessageVideo(message: VideoMessage, rawOptions: JsonObject | undefined){
-
-        const options: MessageContentGenerationOptions | undefined = (rawOptions ? await this.filterOptions(rawOptions) : undefined);
-
-        return this.sendMessage(message, options);
-
-    }
-
-    async sendMessageGif(message: GifMessage, rawOptions: JsonObject | undefined){
-
-        const options: MessageContentGenerationOptions | undefined = (rawOptions ? await this.filterOptions(rawOptions) : undefined);
-
-        return this.sendMessage(message, options);
-
-    }
-
-    async sendMessageAudio(message: AudioMessage, rawOptions: JsonObject | undefined){
-
-        const options: MessageContentGenerationOptions | undefined = (rawOptions ? await this.filterOptions(rawOptions) : undefined);
-
-        return this.sendMessage(message, options);
-
-    }
-
-    async sendMessageDocument(message: DocumentMessage, rawOptions: JsonObject | undefined){
-
-        const options: MessageContentGenerationOptions | undefined = (rawOptions ? await this.filterOptions(rawOptions) : undefined);
-
-        return this.sendMessage(message, options);
-
-    }
-    
-    async sendMessageSticker(message: StickerMessage, rawOptions: JsonObject | undefined){
-
-        const options: MessageContentGenerationOptions | undefined = (rawOptions ? await this.filterOptions(rawOptions) : undefined);
-
-        return this.sendMessage(message, options);
-
-    }
-    
-    async sendMessage(message: AnyMessageContent, options: MessageContentGenerationOptions | undefined): Promise<JsonObject>{
-        
-        try{
-
-            const text = ("text" in message) ? message.text : ("caption" in message) ? message.caption : "";
-
-            const presence: StatusPresence = ("audio" in message ? "recording" : "composing");
-            
-            await this.simulateTyping(presence, text);
-
-            const sentMessage: WAMessage | undefined = await this.sock?.sendMessage(this.jid, message, options);
-
-            if(!sentMessage || !sentMessage.key || !sentMessage.key.id){
-                return {
-                    success: false,
-                    message: "Failed to send message.",
-                };
-            }
-
-            return {
-                success: true,
-                message: "Message sent successfully.",
-            };
-
-        }catch(err){
-
-            return {
-                success: false,
-                error: "Failed to send message: " + (err as Error).message,
-            };
-
-        }
-
-    }
-
-    async deleteMessage(key: WAMessageKey, forEveryone: boolean): Promise<JsonObject>{
-
-        try{
-        
-            if(forEveryone){
-                await this.sock?.sendMessage(this.jid, { delete: key });
-            }else{
-                await this.sock?.chatModify(
-                    {
-                        deleteForMe: {
-                            deleteMedia: true,
-                            key: key,
-                            timestamp: Date.now() / 1000
-                        }
-                    }, 
-                    this.jid
-                )
-            }
-
-            return {
-                success: true,
-                message: "Message deleted successfully.",
-            };
-
-        }catch(err){
-
-            return {
-                success: false,
-                error: "Failed to delete message.",
-            };
-        }
-
-    }
-    async readMessage(messageId: WAMessageKey): Promise<JsonObject>{
-
-        try{
-
-            await this.sock?.readMessages([messageId]);
-
-            return {
-                success: true,
-                message: "Message marked as read successfully.",
-            };
-
-        }catch(err){
-
-            return {
-                success: false,
-                error: "Failed to mark message as read.",
-            };
-
-        }
-
-    }
-
-    async unStar(messageId: string, remoteJid: string, star: boolean): Promise<JsonObject>{
-
-        try{
-            
-            const message: WAMessage | undefined = await PrismaConnection.getMessageById(messageId);
-
-            if(!message){
-                return {
-                    success: false,
-                    error: "Failed to change star status in message, message not found.",
-                };
-            }
-
-            await this.sock?.chatModify({
-                star: {
-                    messages: [{
-                        id: message?.key.id!,
-                        fromMe: message?.key?.fromMe!
-                    }],
-                    star
-                }
-            }, remoteJid);
-            
-            return {
-                success: true,
-                message: "Message marked star successfully.",
-            };
-
-        }catch(err){
-
-            return {
-                success: false,
-                error: "Failed to change star status in message.",
-            };
-
-        }
-
-    }
-
-    formatJid(jid: string){
-        if(jid.endsWith("@s.whatsapp.net") || jid.endsWith("@g.us") || jid.endsWith("@lid")){
-            return jid;
-        }
-        return `${jid}@s.whatsapp.net`;
-    }
-
-    calculateDelay(text: string){
-        const words = text.trim().split(/\s+/).length;
-        const wpm = 40; // words per minute
-        const delayInMinutes = words / wpm;
-        return delayInMinutes * 60 * 1000; // convert to milliseconds
-    }
-
-    async simulateTyping(compose: StatusPresence, text: string): Promise<void>{
-        
-        await this.sock?.presenceSubscribe(this.jid);
-
-        await delay(800);
-
-        await this.sock?.sendPresenceUpdate(compose, this.jid);
-
-        if(typeof this.delay === "string" && this.delay == "auto" && text.length > 0){
-            await delay(this.calculateDelay(text));
-        }else if(typeof this.delay === "number" && this.delay > 0){
-            await delay(this.delay);
-        }
-
-        await this.sock?.sendPresenceUpdate("paused", this.jid);
-
-    }
-
+import { delay, type AnyMessageContent, type MiscMessageGenerationOptions, type WAMessageKey, type WAUrlInfo } from '@whiskeysockets/baileys';
+import type { AudioMessage, ContactMessage, DocumentMessage, ForwardMessage, GifMessage, ImageMessage, LocationMessage, PinMessage, PollMessage, ReactionMessage, StatusPresence, StickerMessage, TextMessage, VideoMessage } from '../../../shared/types.js';
+import { normalizeJid } from '../../../shared/guards.js';
+import { SocketController, RequestError, type ControllerDependencies, type ControllerResult } from './base.js';
+import { downloadPublicMedia } from './remote-media.js';
+import { linkPreviewService } from '../../link-preview/service.js';
+
+type Options = Record<string, any> | undefined;
+type MessageDependencies = ControllerDependencies & { fetchMedia?: (url: string) => Promise<Buffer>; getLinkPreview?: (connection: string, text: string) => Promise<WAUrlInfo | null> };
+export default class MessagesController extends SocketController {
+  private readonly jid: string;
+  private readonly typingDelay: number | string;
+  private readonly fetchMedia: (url: string) => Promise<Buffer>;
+  private readonly getLinkPreview: (connection: string, text: string) => Promise<WAUrlInfo | null>;
+  constructor(owner: string, instanceName: string, jid: string, typingDelay: number | string = 0, dependencies: MessageDependencies = {}) {
+    super(owner, instanceName, dependencies);
+    const normalized = normalizeJid(jid);
+    if (!normalized) throw new RequestError(400, 'Invalid remoteJid.');
+    this.jid = normalized;
+    this.typingDelay = typingDelay;
+    this.fetchMedia = dependencies.fetchMedia ?? downloadPublicMedia;
+    this.getLinkPreview = dependencies.getLinkPreview ?? ((connection, text) => linkPreviewService.preview(connection, text));
+  }
+  async filterOptions(rawOptions: Options): Promise<MiscMessageGenerationOptions> {
+    const options: MiscMessageGenerationOptions = {};
+    if (rawOptions?.quoted) options.quoted = await this.stored(String(rawOptions.quoted), this.jid);
+    return options;
+  }
+  private metadata(message: object, keys: string[]): Record<string, any> { return Object.fromEntries(keys.filter(key => (message as Record<string, unknown>)[key] !== undefined).map(key => [key, (message as Record<string, unknown>)[key]])); }
+  private mediaBuffer(url: string): Promise<Buffer> { void this.sock; return this.fetchMedia(url); }
+  async sendMessageText(message: TextMessage, options?: Options) { return this.sendMessage({ text: message.text, ...this.metadata(message, ['mentions']) }, await this.filterOptions(options)); }
+  async sendMessageLocation(message: LocationMessage, options?: Options) { return this.sendMessage({ location: { degreesLatitude: message.location.degreesLatitude, degreesLongitude: message.location.degreesLongitude, ...this.metadata(message.location, ['name', 'address']) } }, await this.filterOptions(options)); }
+  async sendMessageContact(message: ContactMessage, options?: Options) {
+    const escape = (text: string) => text.replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/[\r\n]+/g, ' ');
+    const vcard = `BEGIN:VCARD\nVERSION:3.0\nFN:${escape(message.displayName)}\nTEL;type=CELL;type=VOICE;waid=${message.waid}:${escape(message.phoneNumber)}\nEND:VCARD`;
+    return this.sendMessage({ contacts: { displayName: message.displayName, contacts: [{ vcard }] } }, await this.filterOptions(options));
+  }
+  async sendMessageReaction(reaction: ReactionMessage) {
+    const target = await this.stored(reaction.messageId, this.jid);
+    return this.sendMessage({ react: { text: reaction.emoji, key: target.key } });
+  }
+  async sendMessagePoll(message: PollMessage, options?: Options) { return this.sendMessage({ poll: { name: message.poll.name, values: message.poll.values, selectableCount: message.poll.selectableCount, ...this.metadata(message.poll, ['toAnnouncementGroup']) } }, await this.filterOptions(options)); }
+  async sendMessageImage(message: ImageMessage, options?: Options) { return this.sendMessage({ image: await this.mediaBuffer(message.image.url), ...this.metadata(message, ['caption', 'viewOnce']) }, await this.filterOptions(options)); }
+  async sendMessageVideo(message: VideoMessage, options?: Options) { return this.sendMessage({ video: await this.mediaBuffer(message.video.url), ...this.metadata(message, ['caption', 'viewOnce', 'ptv']) }, await this.filterOptions(options)); }
+  async sendMessageGif(message: GifMessage, options?: Options) { return this.sendMessage({ video: await this.mediaBuffer(message.video.url), gifPlayback: true, ...this.metadata(message, ['caption', 'viewOnce', 'ptv']) }, await this.filterOptions(options)); }
+  async sendMessageAudio(message: AudioMessage, options?: Options) { return this.sendMessage({ audio: await this.mediaBuffer(message.audio.url), mimetype: message.mimetype, ...this.metadata(message, ['ptt', 'viewOnce']) }, await this.filterOptions(options)); }
+  async sendMessageDocument(message: DocumentMessage, options?: Options) { return this.sendMessage({ document: await this.mediaBuffer(message.document.url), mimetype: message.mimetype, fileName: message.fileName }, await this.filterOptions(options)); }
+  async sendMessageSticker(message: StickerMessage, options?: Options) { return this.sendMessage({ sticker: await this.mediaBuffer(message.sticker.url), ...this.metadata(message, ['isAnimated']) }, await this.filterOptions(options)); }
+  async sendMessageForward(message: ForwardMessage, options?: Options) { return this.sendMessage({ forward: await this.stored(message.forward) }, await this.filterOptions(options)); }
+  async sendMessagePin(message: PinMessage) {
+    const target = await this.stored(String(message.pin.key.id), this.jid);
+    return this.sendMessage({ pin: target.key, type: message.pin.type as 1 | 2, time: message.pin.time as 86400 | 604800 | 2592000 });
+  }
+  async editMessage(messageId: string, text: string) {
+    const target = await this.stored(messageId, this.jid);
+    if (!target.key.fromMe) throw new RequestError(403, 'Only messages sent by this account can be edited.');
+    return this.sendMessage({ text, edit: target.key });
+  }
+  async sendMessage(message: AnyMessageContent, options?: MiscMessageGenerationOptions): Promise<ControllerResult> {
+    const result = await this.perform('Message sent successfully.', async sock => {
+      const text = ('text' in message ? message.text : 'caption' in message ? message.caption : '') ?? '';
+      // Always provide a ready preview or null: undefined enables the provider's downloader.
+      let linkPreview: WAUrlInfo | null = null;
+      if ('text' in message) {
+        try { linkPreview = await this.getLinkPreview(this.instance, message.text) ?? null; }
+        catch { /* A failed preview must never prevent sending the original text. */ }
+      }
+      await this.simulateTyping('audio' in message ? 'recording' : 'composing', text);
+      if (this.sock !== sock) throw new RequestError(409, 'Instance connection changed before sending.');
+      const content = 'text' in message ? { ...message, linkPreview } : message;
+      const sent = await sock.sendMessage(this.jid, content, options);
+      if (!sent?.key?.id) throw new RequestError(502, 'WhatsApp did not return a message identifier.');
+      // A confirmed send must not become a failure that invites duplicate retries if persistence is unavailable.
+      let syncPending = false;
+      try { await this.persistSent(sent); } catch { syncPending = true; }
+      return { sent, syncPending };
+    });
+    if (!result.success) return result;
+    const sent = result.data.sent;
+    return { success: true, message: result.message ?? 'Message sent successfully.', messageId: sent.key.id, key: sent.key, data: sent, ...(result.data.syncPending ? { syncPending: true } : {}) };
+  }
+  async deleteMessage(key: WAMessageKey, forEveryone: boolean): Promise<ControllerResult> {
+    const target = await this.stored(String(key.id), this.jid);
+    return this.perform('Message deleted successfully.', async sock => {
+      if (forEveryone) await sock.sendMessage(this.jid, { delete: target.key });
+      else await sock.chatModify({ deleteForMe: { deleteMedia: true, key: target.key, timestamp: Number(target.messageTimestamp ?? Math.floor(Date.now() / 1000)) } }, this.jid);
+    });
+  }
+  async readMessage(key: WAMessageKey): Promise<ControllerResult> {
+    const target = await this.stored(String(key.id), this.jid);
+    return this.perform('Message marked as read successfully.', async sock => { await sock.readMessages([target.key]); });
+  }
+  async readMessages(messageIds: string[]): Promise<ControllerResult> {
+    // Validate the complete batch against this instance AND chat before sending a receipt.
+    const targets = await Promise.all([...new Set(messageIds)].map(id => this.stored(id, this.jid)));
+    const keys = targets.filter(message => !message.key.fromMe).map(message => message.key);
+    return this.perform('Messages marked as read successfully.', async sock => { if (keys.length) await sock.readMessages(keys); });
+  }
+  async unStar(messageId: string, remoteJid: string, star: boolean): Promise<ControllerResult> {
+    const target = await this.stored(messageId, this.jid);
+    return this.perform('Message star status changed successfully.', async sock => { await sock.chatModify({ star: { messages: [{ id: target.key.id!, fromMe: Boolean(target.key.fromMe) }], star } }, this.jid); });
+  }
+  formatJid(jid: string): string { const value = normalizeJid(jid); if (!value) throw new RequestError(400, 'Invalid remoteJid.'); return value; }
+  calculateDelay(text: string): number { return Math.min(30_000, Math.ceil(text.trim().split(/\s+/).filter(Boolean).length / 40 * 60_000)); }
+  async simulateTyping(presence: StatusPresence, text: string): Promise<void> {
+    const duration = this.typingDelay === 'auto' ? this.calculateDelay(text) : typeof this.typingDelay === 'number' ? Math.min(Math.max(this.typingDelay, 0), 30_000) : 0;
+    if (!duration) return;
+    const sock = this.sock;
+    await sock.presenceSubscribe(this.jid);
+    await sock.sendPresenceUpdate(presence, this.jid);
+    try { await delay(duration); } finally { await sock.sendPresenceUpdate('paused', this.jid); }
+  }
 }

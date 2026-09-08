@@ -1,87 +1,22 @@
-import PrismaConnection from "../../../core/connection/prisma";
-import { instances } from "../../../shared/constants";
-import { downloadMediaMessage, WASocket, WAMessage } from "@whiskeysockets/baileys";
+import { downloadMediaMessage, normalizeMessageContent, getContentType, type WAMessage } from '@whiskeysockets/baileys';
+import { SocketController, RequestError, type ControllerDependencies, type ControllerResult } from './base.js';
 
-export default class MediaController {
-
-    private sock: WASocket | undefined;
-
-    constructor(owner: string, instanceName: string){
-        const key = `${owner}_${instanceName}`;
-        this.sock = instances[key]?.getSock();
-    }
-
-    async getMedia(messageId: string, isBase64: boolean = false){
-
-        if(!this.sock){
-            return {
-                success: false,
-                error: "Instance not connected.",
-            };
-        }
-
-        const msg = await PrismaConnection.getMessageById(messageId) as WAMessage | undefined;
-
-        if(!msg || !msg.message){
-            return {
-                success: false,
-                error: "Message not found.",
-            };
-        }
-
-        try{
-
-            const content = msg.message;
-            const isMediaMessage = Object.keys(content).find(k => k.startsWith("image") || k.startsWith("video") || k.startsWith("audio") || k.startsWith("document") || k.startsWith("sticker"));
-
-            if(!isMediaMessage){
-                console.error("Message is not a media message.");
-                return {
-                    success: false,
-                    error: "Message is not a media message.",
-                };
-            }
-
-            try{
-
-                const buffer = await downloadMediaMessage(msg, "buffer", {}, {logger: this.sock?.logger, reuploadRequest: this.sock?.updateMediaMessage!});
-
-                const mimeType = (content as any)[isMediaMessage!].mimetype || "application/octet-stream";
-
-                if(isBase64){
-
-                    const base64Data = buffer.toString('base64');
-
-                    return {
-                        success: true,
-                        base64: `data:${mimeType};base64,${base64Data}`,
-                    };
-
-                }else{
-                    return {
-                        success: true,
-                        buffer: buffer,
-                        mimeType: mimeType,
-                    };
-                }
-
-            }catch(err){
-                return {
-                    success: false,
-                    error: "Error downloading media message.",
-                };
-            }
-
-            
-
-        }catch(err){
-            console.error("Error fetching media message:", err);
-            return {
-                success: false,
-                error: "Error fetching media message.",
-            };
-        }
-
-    }
-
+type MediaDependencies = ControllerDependencies & { download?: typeof downloadMediaMessage };
+export default class MediaController extends SocketController {
+  private readonly download: typeof downloadMediaMessage;
+  constructor(owner: string, instanceName: string, dependencies: MediaDependencies = {}) { super(owner, instanceName, dependencies); this.download = dependencies.download ?? downloadMediaMessage; }
+  async getMedia(messageId: string, isBase64 = false): Promise<ControllerResult> {
+    const result = await this.perform('Media downloaded.', async sock => {
+      const original = await this.stored(messageId);
+      const content = normalizeMessageContent(original.message);
+      const type = content ? getContentType(content) : undefined;
+      if (!type || !['imageMessage', 'videoMessage', 'audioMessage', 'documentMessage', 'stickerMessage'].includes(type)) throw new RequestError(400, 'Message is not downloadable media.');
+      const message = { ...original, message: content } as WAMessage;
+      const buffer = await this.download(message, 'buffer', {}, { logger: sock.logger, reuploadRequest: msg => sock.updateMediaMessage(msg) });
+      if (buffer.length > 50 * 1024 * 1024) throw new RequestError(413, 'Media exceeds 50 MB.');
+      const mimeType = String((content as Record<string, any>)[type]?.mimetype ?? (type === 'stickerMessage' ? 'image/webp' : 'application/octet-stream'));
+      return isBase64 ? { base64: `data:${mimeType};base64,${buffer.toString('base64')}` } : { buffer, mimeType };
+    });
+    return result.success ? { success: true, ...result.data } : result;
+  }
 }

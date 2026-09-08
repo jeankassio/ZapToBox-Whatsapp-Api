@@ -1,139 +1,69 @@
-import Instance from "../../baileys/services";
-import InstancesRepository from "../../../core/repositories/instances";
-import { instances, instanceStatus, sessionsPath } from "../../../shared/constants";
-import { clearInstanceWebhooks, removeInstancePath } from "../../../shared/utils";
-import path from "path";
-import { InstanceCreated } from "../../../shared/types";
+import Instance from "../../baileys/services.js";
+import InstancesRepository from "../../../core/repositories/instances.js";
+import PrismaConnection, { prisma } from "../../../core/connection/prisma.js";
+import { instances, instanceConnection, instanceStatus, sessionsPath } from "../../../shared/constants.js";
+import { instanceKey } from "../../../shared/identity.js";
+import { publicInstanceInfo } from "../../../shared/instance-info.js";
+import { safeSessionDirectory } from "../../state/auth-state.js";
+import { removeInstancePath, trySendWebhook } from "../../../shared/utils.js";
+import { RequestError } from "./base.js";
 
-export default class InstancesController {
-
-    async create(owner: string, instanceName: string, phoneNumber: string | undefined) {
-        try {
-            
-            const key = `${owner}_${instanceName}`;
-
-            if(typeof instances[key] === 'undefined'){
-
-                instances[key] = new Instance;
-
-                const {instance, qrCode, pairingCode} = await instances[key].create({ owner, instanceName, phoneNumber });
-
-                const response: InstanceCreated = {
-                    success: true,
-                    message: "Instance Created Successfully!",
-                    instance: {
-                        owner: instance.owner,
-                        instanceName: instance.instanceName,
-                        connectionStatus: instance.connectionStatus,
-                        profilePictureUrl: instance.profilePictureUrl || undefined
-                    },
-                };
-
-                if(pairingCode){
-                    response.pairingCode = pairingCode;
-                }else if(qrCode){
-                    response.qrCode = qrCode;
-                }
-
-                return response;
-
-            }else{
-
-                return {
-                    success: false,
-                    error: "Instance with this owner exists.",
-                };
-
-            }
-
-            
-        } catch (err: any) {
-            console.error("Error in Instance Creator", err);
-            return {
-                success: false,
-                error: "Internal Error in Instance Creator.",
-                details: err.message,
-            };
-        }
-    }
-
-    async connect(owner: string, instanceName: string){
-
-        try{
-
-            const key = `${owner}_${instanceName}`;
-
-            const status = instanceStatus.get(key);
-
-            if(status && status === "ONLINE"){
-                return {
-                    success: false,
-                    error: "Instance is already connected",
-                };
-            }
-
-            await clearInstanceWebhooks(key);
-            const instancePath = path.join(sessionsPath, owner, instanceName);
-            await removeInstancePath(instancePath);
-
-            return this.create(owner, instanceName, undefined);
-
-        }catch(err: any){
-            console.error("Error on connect instance:", err);
-            return {
-                success: false,
-                error: err.message,
-            };
-        }
-
-    }
-
-    async delete(owner: string, instanceName: string){
-
-        try{
-
-            const key = `${owner}_${instanceName}`;
-            const instanceRemove = instances[key];
-
-            instanceRemove?.clearInstance();
-
-            console.log(`[${owner}/${instanceName}] REMOVED`);
-
-            return {
-                success: true,
-                message: "Instance removed successfully"
-            }
-
-        }catch(err: any){
-            console.error("Error on connect instance:", err);
-            return {
-                success: false,
-                error: err.message,
-            };
-        }
-
-    }
-
-    async get(owner: string | undefined) {
-
-        try{
-            
-            const repo = await (new InstancesRepository).list(owner);
-
-            return {
-                success: true,
-                data: repo
-            };
-
-        }catch(err: any){
-            console.error("Error in List Instances:", err);
-            return {
-                success: false,
-                error: err.message,
-            };
-        }
-
-    }
-
+const lifecycle = new Map<string,Promise<unknown>>();
+async function exclusive<T>(key:string,action:()=>Promise<T>):Promise<T> {
+  const pending=(lifecycle.get(key) ?? Promise.resolve()).catch(()=>{}).then(action);
+  lifecycle.set(key,pending);
+  try {return await pending;} finally {if(lifecycle.get(key)===pending)lifecycle.delete(key);}
 }
 
+export default class InstancesController {
+  async create(owner:string,instanceName:string,phoneNumber?:string) {
+    return exclusive(instanceKey(owner,instanceName),()=>this.createUnlocked(owner,instanceName,phoneNumber));
+  }
+  private async createUnlocked(owner:string,instanceName:string,phoneNumber?:string) {
+    const key=instanceKey(owner,instanceName);
+    const existing=await this.find(owner,instanceName);
+    if(existing) return {success:true,idempotent:true,instance:existing};
+    return this.startUnlocked(owner,instanceName,phoneNumber);
+  }
+  private async startUnlocked(owner:string,instanceName:string,phoneNumber?:string) {
+    const key=instanceKey(owner,instanceName);
+    const instance=new Instance();
+    instances[key]=instance;
+    try {return {success:true,...await instance.create({owner,instanceName,phoneNumber})};}
+    catch(error) {await instance.shutdown();delete instances[key];throw error;}
+  }
+  async find(owner:string,instanceName:string) {
+    const key=instanceKey(owner,instanceName);
+    const loaded=instanceConnection[key];
+    if(instances[key]) return publicInstanceInfo(loaded ?? {owner,instanceName,connectionStatus:instanceStatus.get(key) ?? 'OFFLINE'});
+    return (await new InstancesRepository().list(owner)).find(row=>row.instanceName===instanceName) ?? null;
+  }
+  async connect(owner:string,instanceName:string) {
+    const key=instanceKey(owner,instanceName);
+    return exclusive(key,async()=>{
+      const instance=instances[key];
+      if(instance) return {success:true,...await instance.reconnect()};
+      return this.startUnlocked(owner,instanceName);
+    });
+  }
+  async delete(owner:string,instanceName:string) {
+    const key=instanceKey(owner,instanceName);
+    return exclusive(key,async()=>{
+    const instance=instances[key];
+    if(instance) await instance.clearInstance();
+    else {
+      const directory=await safeSessionDirectory(sessionsPath,owner,instanceName).catch(error=>{
+        if((error as NodeJS.ErrnoException).code==='ENOENT')return undefined;
+        throw error;
+      });
+      await PrismaConnection.deleteByInstance(key);
+      await prisma.authState.deleteMany({where:{instance:key}});
+      if(directory)await removeInstancePath(directory);
+      delete instanceConnection[key];instanceStatus.set(key,'REMOVED');
+      await trySendWebhook('connection.removed',{owner,instanceName,connectionStatus:'REMOVED'},{});
+    }
+    return {success:true,message:'Instance removed successfully'};
+    });
+  }
+  async get(owner?:string) {return {success:true,data:await new InstancesRepository().list(owner)};}
+}

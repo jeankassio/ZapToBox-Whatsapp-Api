@@ -1,0 +1,16 @@
+{
+  "apps": [{
+    "name": "zaptobox-whatsapp-api",
+    "script": "dist/main.js",
+    "cwd": ".",
+    "instances": 1,
+    "exec_mode": "fork",
+    "watch": false,
+    "autorestart": true,
+    "restart_delay": 2000,
+    "min_uptime": 10000,
+    "max_restarts": 5,
+    "kill_timeout": 30000,
+    "time": true
+  }]
+}

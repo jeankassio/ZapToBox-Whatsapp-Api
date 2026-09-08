@@ -1,303 +1,70 @@
+# ZapToBox WhatsApp API
 
-<div align="center">
+Serviço TypeScript/ESM para sessões WhatsApp, mensagens, grupos, perfil, privacidade, mídia e webhooks. Usa Node.js 24+, PostgreSQL/Prisma e **Baileys 7.0.0-rc14**, fixado no lockfile. Essa versão é uma **release candidate**, não a versão final 7.0.0. Referências: [release oficial](https://github.com/WhiskeySockets/Baileys/releases/tag/v7.0.0-rc14) e [migração para Baileys 7](https://baileys.wiki/migration/v7).
 
-# ZapToBox Whatsapp Api
+O frontend do atendimento permanece em `../ZapToBox novo - Front`, e a API de contas/conversas em `../ZapToBox novo - Back`. Este serviço mantém os sockets Baileys e não serve páginas HTML.
 
-[![jeankassio - ZapToBox-Whatsapp-Api](https://img.shields.io/static/v1?label=jeankassio&message=ZapToBox-Whatsapp-Api&color=darkgreen&logo=github)](https://github.com/jeankassio/ZapToBox-Whatsapp-Api "Go to GitHub repo")
-[![stars - ZapToBox-Whatsapp-Api](https://img.shields.io/github/stars/jeankassio/ZapToBox-Whatsapp-Api?style=social)](https://github.com/jeankassio/ZapToBox-Whatsapp-Api)
-[![forks - ZapToBox-Whatsapp-Api](https://img.shields.io/github/forks/jeankassio/ZapToBox-Whatsapp-Api?style=social)](https://github.com/jeankassio/ZapToBox-Whatsapp-Api)
-  
+## Executar localmente
 
-[![Support](https://img.shields.io/badge/-Grupo%20Whatsapp-darkgreen?style=for-the-badge&logo=whatsapp)](https://chat.whatsapp.com/Deus9QmrfZlJaZIf46F129)
+Instale Node.js 24+ e disponibilize um banco PostgreSQL para a aplicação. Na primeira configuração, copie `.env.example` para `.env`; preserve um `.env` existente.
 
-
-[![Support](https://img.shields.io/badge/Buy%20me%20coffe-PayPal-blue?style=for-the-badge)](https://paypal.me/JAlmeidaCheib)
-[![Support](https://img.shields.io/badge/Buy%20me%20coffe-Pix-darkturquoise?style=for-the-badge)](#pix)
-</div>
-
-<p align="center"> 
-<img src="https://img.shields.io/badge/WhatsApp-Baileys%20Core-green?style=for-the-badge" /> 
-<img src="https://img.shields.io/badge/TypeScript-5.x-blue?style=for-the-badge" /> 
-<img src="https://img.shields.io/badge/Node.js-18%2B-43853D?style=for-the-badge&logo=node.js&logoColor=white" /> 
-<img src="https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge" /> 
-
-<img alt="background github" src="https://github.com/user-attachments/assets/759f09c2-a49a-4e57-a2bc-2e995fc21fb8" />
-
-</p>
-
-REST API platform for integrating systems with WhatsApp with stability, multi-instance management, message sending, and full webhook event streaming.
-Designed for enterprise automation, bots, SaaS platforms, CRMs, ERPs, and large-scale integrations.
-
-# Overview
-
-ZapToBox WhatsApp API is an advanced REST platform built on top of Baileys, enabling fast and stable integration between applications and WhatsApp.
-
-#### The project supports:
-
-- Multi-instance session management
-
-- File-system based authentication (/sessions/{{owner}}/{{instanceName}})
-
-- Full event webhook streaming
-
-- High-performance message persistence
-
-- All Baileys methods exposed through endpoints
-
-- Scalable architecture using DDD (Domain Driven Design)
-
-- Full TypeScript backend with Prisma ORM
-
-- Automatic reconnection and failure handling
-
-- Connection with QrCode and Pairing Code
-
-
-# Features
-
-### Multi-instance Session Architecture
-
-Each instance is fully isolated using the structure:
-
-```bash
-/sessions/{owner}/{instanceName}
+```powershell
+cd 'D:\ZapToBox\ZapToBox-Whatsapp-Api'
+npm ci
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
-This enables:
+Preencha os valores antes de iniciar:
 
-- Multiple authenticated devices per system
+| Variável | Valor/uso |
+| --- | --- |
+| `DATABASE_URL` | Conexão PostgreSQL com usuário, senha e banco próprios. |
+| `HOST` | `127.0.0.1` no desenvolvimento local. |
+| `PORT` | `3001`, deixando 3000 para o backend do atendimento. |
+| `JWT_TOKEN` | Segredo aleatório com pelo menos 32 caracteres. Bearer administrativo, igual a `WPP_API_TOKEN` no backend. |
+| `AUTH_STORE` | `database` por padrão; alternativa local `filesystem`. |
+| `WEBHOOK_URL` | `http://localhost:3000/api/webhooks/whatsapp`. |
+| `WEBHOOK_SECRET` | Segredo aleatório com pelo menos 32 caracteres, igual ao configurado no backend. |
+| `WEBHOOK_QUEUE` | `true` para preservar eventos e repetir falhas. |
+| `TRUSTED_MEDIA_ORIGINS` | Origens exatas do backend ZapToBox autorizadas para anexos (ex.: `https://backend.zaptobox.pro`). |
 
-- Multi-user/multi-tenant architecture
+Depois de configurar banco e segredos:
 
-- Stateless REST integration across environments
-
-### All Baileys Functionalities Exposed via API
-
-#### The platform exposes every usable operation from Baileys, including:
-
-- Messages 
-
-- Media
-
-- Chat 
-
-- Group
-
-- Profile
-
-- Privacy
-
-
-### Webhook Event Streaming
-
-#### All supported Baileys events are forwarded to your system in real-time, they are:
-
-- messaging-history.set
-- chats.upsert
-- chats.update
-- chats.delete
-- lid-mapping.update
-- presence.update
-- contacts.upsert
-- contacts.update
-- messages.upsert
-- messages.update
-- messages.delete
-- messages.media-update
-- messages.reaction
-- message-receipt.update
-- groups.upsert
-- groups.update
-- group-participants.update
-- group.join-request
-- blocklist.set
-- blocklist.update
-- call
-- labels.edit
-- labels.association
-- newsletter.reaction
-- newsletter.view
-- newsletter-participants.update
-- newsletter-settings.update
-
-#### And as additional webhook events:
-
-- contacts.set
-- chats.set
-- messages.set
-- qrcode.updated
-- qrcode.limit
-- pairingcode.updated
-- pairingcode.limit
-- connection.connecting
-- connection.open
-- connection.close
-- connection.removed
-
-
-## Status de Mensagem do WhatsApp (Baileys)
-
-The message status returned by Baileys is an integer (`status`). For quick reference when integrating it into your project, see below how to map it:
-
-| Número | String        
-|--------|---------------
-| 0      | ERROR         |
-| 1      | PENDING       |
-| 2      | SENT          |
-| 3      | DELIVERED     |
-| 4      | READ          |
-| 5      | PLAYED        |
-
-
-# Project Structure
-
-- `/prisma`
-    - `/migrations`
-        - `...`
-    - `schema.prisma`
-- `/src`
-    - `/core`
-        - `/connection`
-            - `prisma.ts`
-        - `/repositories`
-            - `instances.ts`
-    - `/infra`
-        - `/baileys`
-            - `services.ts`
-        - `/config`
-            - `env.ts`
-        - `/http`
-            - `/controllers`
-                - `chat.ts`
-                - `group.ts`
-                - `instances.ts`
-                - `media.ts`
-                - `messages.ts`
-                - `privacy.ts`
-                - `profile.ts`
-            - `/routes`
-                - `chat.ts`
-                - `group.ts`
-                - `instances.ts`
-                - `media.ts`
-                - `messages.ts`
-                - `privacy.ts`
-                - `profile.ts`
-        - `/mappers`
-            - `contactMapper.ts`
-            - `messageMapper.ts`
-        - `/state`
-            - `auth.ts`
-            - `sessions.ts`
-        - `/webhook`
-            - `queue.ts`
-    - `/shared`
-        - `constants.ts`
-        - `types.ts`
-        - `utils.ts`
-    - `main.ts`
-- `/docs`
-- `.env.example`
-- `.gitignore`
-- `docker-compose.yml`
-- `Dockerfile`
-- `LICENSE`
-- `package.json`
-- `prisma.config.ts`
-- `README.md`
-- `tsconfig.json`
-
-
-# Installation
-
-### Clone the repository
-
-```bash
-git clone https://github.com/jeankassio/ZapToBox-Whatsapp-Api.git
-cd ZapToBox-Whatsapp-Api
-```
-
-### Install dependencies
-
-```bash
-npm install
-```
-
-### Environment configuration
-
-#### Rename .env.example to .env
-
-```bash
-cp .env.example .env
-```
-##### Please fill in all the information correctly within the .env file before proceeding, especially the PostgreSQL connection URL.
-
-### Deploy Prisma
-
-```bash
-npx prisma migrate deploy
-```
-##### Confirm and proceed
-
-
-# Running 
-
-## Development
-
-```bash
-npm run dev
-```
-
-## Production (auto build)
-
-```bash
-npm run start
-```
-
-## Production (PM2)
-
-### build
-
-```bash
+```powershell
+npm run db:migrate
 npm run build
-```
-### run
-
-```bash
-npm run start:pm2
-
-//optionals:
-pm2 save
-pm2 startup
+npm start
 ```
 
-## Docker Deploy
+`npm run dev` executa TypeScript com recarga. `npm run build` gera o Prisma Client e compila. `GET http://localhost:3001/health` verifica o processo; `/health/ready` exige Bearer e verifica inicialização/banco, sem garantir WhatsApp online. Para uma base antiga, faça backup e revise as migrations antes de aplicar; não apague credenciais para resolver falha de atualização.
 
-### Build the image
+Se ocorrer **EADDRINUSE**, execute `npm run diagnose` no servidor afetado. Há uma execução ocupando a porta; `build:start` não reinicia processos existentes. Com PM2 como único supervisor, `npm run build:pm2` usa início/reinício coordenado em uma instância. Em painéis de hospedagem, use a ação de reiniciar do próprio painel. Veja [inicialização, conflito de porta e avisos npm](docs/startup.md).
 
-```bash
-docker build -t zaptobox-whatsapp-api
+O lockfile inclui correções de dependências identificadas na atualização: `link-preview-js` 5.0.0 e override de `deepmerge-ts` 8.0.2. Em 07/09/2026, `npm audit` não apontou vulnerabilidades. Use `npm ci` para reproduzir as versões verificadas.
+
+O `docker-compose.yml` mantém PostgreSQL 16 e volumes persistentes. Consulte os valores do `.env.example` antes de iniciar containers. Uma atualização de imagem PostgreSQL entre versões principais precisa de migração própria; os testes adicionais em PostgreSQL 18 não alteram automaticamente a versão de um volume existente.
+
+No backend de atendimento, configure `WPP_API_URL=http://localhost:3001` e o token correspondente. Texto usa `POST /messages/sendText/:owner/:instanceName` com `{remoteJid,text}`; não é preciso configurar rota alternativa.
+
+Envios e edições de texto incluem prévias de links quando o site disponibiliza uma imagem compatível. A API prepara a miniatura JPEG com consultas restritas a endereços públicos, prazo total de 6 segundos e limites de download/processamento. O cache é isolado por conexão. Sites privados, indisponíveis ou incompatíveis resultam em texto sem prévia, sem impedir nem repetir o envio. Veja os [limites e formatos das prévias](docs/api.md#mensagens).
+
+## Pareamento e contratos
+
+Crie uma conexão pelo frontend ou por `POST /instances/create`, conforme a [documentação HTTP completa](docs/api.md). A rota exige `Idempotency-Key` UUID v4 e é idempotente para a mesma identidade `owner/instanceName`; `GET /instances/status/:owner/:instanceName` permite reconciliação exata sem listar outras sessões. A nova sessão precisa ser pareada por QR no aplicativo WhatsApp. A API também aceita `phoneNumber` para solicitar código. Sucesso HTTP na criação não significa conta online: aguarde `connection.open`.
+
+Signal keys, histórico e contatos são persistidos por instância. Reiniciar e reconectar preservam histórico. Webhooks usam gravação atômica, retries e dead-letter; veja [eventos, payloads e operação da fila](docs/webhooks.md).
+
+O [progresso de sincronização](docs/history-sync.md) identifica recebimento e importação de lotes, preservando contagens e reentregas. O percentual informado pelo WhatsApp pertence à etapa atual; não representa todo o histórico nem o download das mídias.
+
+## Verificação e limites
+
+```powershell
+npm run typecheck
+npm test
 ```
-### Run
 
-```bash
-docker run -d --name zaptobox -p 3000:3000 --env-file .env zaptobox-whatsapp-api
-```
+Os testes usam sockets e provedores controlados, e há validação de persistência em PostgreSQL e do fluxo HTTP entre backend, API e webhook. Não pareiam uma conta nem enviam mensagens reais. Fotos/anexos de saída precisam estar em URLs públicas válidas; não há transcodificação automática. A configuração do Compose foi validada; o build de container depende de um daemon Docker ativo.
 
-# API Docs
+Testes com PostgreSQL são opcionais: configure `QA_DATABASE_URL` para um banco **descartável**, local e com nome iniciado por `qa_`, já migrado. O teste integrado também usa `QA_BACKEND_PATH` com o caminho do backend previamente compilado. Sem essas variáveis, esses casos são ignorados; os testes unitários continuam disponíveis. Não use o banco da aplicação como banco de QA.
 
-##### You can find complete documentation for the endpoints at:
-
-- [Postman](https://www.postman.com/jeankassio12/zaptobox-api)
-
-# Donate
-
-<div align="center">
-  
-### Pix
-
-<img width="40%" alt="image" src="https://github.com/user-attachments/assets/063c3bc1-36a8-4825-a6c5-f633f887f6c6" />
-
-#### 6dcc2052-0b7c-4947-831d-46d67235416e
-
-</div>
+Execute um processo por conjunto de sessões e diretório de fila. PM2 pode supervisioná-lo, mas cluster/réplicas precisam de coordenação adicional. Preserve banco, sessões e fila em volumes persistentes. O atendimento oferece envio de texto e leitura de mídia; outras rotas documentadas ficam disponíveis para clientes autenticados, sem criar telas de bots ou financeiro.

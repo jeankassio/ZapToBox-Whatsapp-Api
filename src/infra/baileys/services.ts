@@ -1,675 +1,462 @@
 import makeWASocket, {
-    DisconnectReason,
-    useMultiFileAuthState,
-    WASocket,
-    fetchLatestBaileysVersion,
-    BaileysEventMap,
-    WABrowserDescription,
-    CacheStore,
-    getAggregateVotesInPollMessage,
-    WAMessage,
-    proto,
-    delay,
-    getContentType,
-} from "@whiskeysockets/baileys";
-import * as fs from "fs";
-import * as path from "path";
-import QRCode from "qrcode";
-import { release } from "os";
-import NodeCache from "node-cache"
-import P from "pino";
-import { baileysEvents, instanceConnection, instances, instanceStatus, sessionsPath } from "../../shared/constants";
-import { clearInstanceWebhooks, genProxy, removeInstancePath, trySendWebhook } from "../../shared/utils";
-import { ConnectionStatus, InstanceData, MessageWebhook } from "../../shared/types";
-import UserConfig from "../config/env";
-import PrismaConnection from "../../core/connection/prisma";
-
-const msgRetryCounterCache: CacheStore = new NodeCache();
-const userDevicesCache: CacheStore = new NodeCache();
-const groupCache = new NodeCache({stdTTL: 5 * 60, useClones: false});
-
-export default class Instance{
-
-    private sock!: WASocket;
-    private instance!: InstanceData;
-    private owner!: string;
-    private instanceName!: string;
-    private key!: string;
-    private instancePath!: string;
-    private qrCodeCount!: number;
-    private qrCodeResolver?: (qrBase64: string) => void;
-    private qrCodePromise?: Promise<string>;
-    private phoneNumber?: string | undefined;
-    private reconnectAttempts = 0;
-    private maxReconnectAttempts = 5;
-
-    getSock(): (WASocket | undefined){
-        return this?.sock;
-    }
-
-    async create(data: { owner: string; instanceName: string , phoneNumber: string | undefined}) {
-        this.owner = String(data.owner);
-        this.instanceName = String(data.instanceName);
-        this.phoneNumber = data.phoneNumber?.replace(/\D/g, "");
-        
-        this.instancePath = path.join(sessionsPath, this.owner, this.instanceName);
-        if (!fs.existsSync(path.join(sessionsPath, this.owner))){
-            fs.mkdirSync(path.join(sessionsPath, this.owner));
-        }
-        if (!fs.existsSync(this.instancePath)) {
-            fs.mkdirSync(this.instancePath);
-        }
-
-        const { state, saveCreds } = await useMultiFileAuthState(this.instancePath);
-        const { version } = await fetchLatestBaileysVersion();
-
-        const browser: WABrowserDescription  = [UserConfig.sessionClient, UserConfig.sessionName, release()];
-        const agents = await genProxy(UserConfig.proxyUrl);
-
-        this.qrCodePromise = new Promise((resolve) => {
-            this.qrCodeResolver = resolve;
-        });
-
-        let sock: WASocket | undefined;
-        try{
-            sock = makeWASocket({
-                auth: state,
-                version,
-                browser,
-                emitOwnEvents: true,
-                generateHighQualityLinkPreview: true,
-                syncFullHistory: true,
-                msgRetryCounterCache: msgRetryCounterCache,
-                userDevicesCache: userDevicesCache,
-                enableAutoSessionRecreation: true,
-                agent: agents.wsAgent,
-                fetchAgent: agents.fetchAgent,
-                retryRequestDelayMs: 3 * 1000,
-                maxMsgRetryCount: 1000,
-                logger: P({level: 'fatal'}),
-                cachedGroupMetadata: async (jid) => groupCache.get(jid),
-                getMessage: async (key) => await this.getMessage(key.id!) as proto.IMessage,
-                qrTimeout: UserConfig.qrCodeTimeout * 1000
-            });
-        }catch(err){
-            console.error(`[${this.owner}/${this.instanceName}] Error creating socket`, err);
-            await this.reconnectWithBackoff();
-            throw err;
-        }
-
-        this.sock = sock;
-        this.attachSocketErrorHandlers();
-
-        this.key = `${this.owner}_${this.instanceName}`;
-
-        this.instance = {
-            owner: this.owner,
-            instanceName: this.instanceName,
-            socket: this.sock,
-            connectionStatus: "OFFLINE",
-        };
-
-        instanceConnection[this.key] = this.instance;
-
-        this.setStatus("OFFLINE");
-
-        this.instanceEvents(saveCreds);
-
-        this.qrCodeCount = 0;
-
-        let qrCodeReturn: string | undefined;
-        let pairingCodeReturn: string | undefined;
-
-        if(this.phoneNumber){
-
-            if(!this.sock.authState.creds.registered){
-
-                try {
-                
-                    const pNumber = this.phoneNumber;
-
-                    await delay(500);
-
-                    pairingCodeReturn = await this.sock.requestPairingCode(pNumber);
-
-                    console.log(pairingCodeReturn);
-
-                } catch(err) {
-                    console.log("Error requesting pairing code:", err);
-                    pairingCodeReturn = undefined;
-                }
-
-            }
-
-        }else{
-
-            try {
-                const qrCode = await Promise.race([
-                    this.qrCodePromise,
-                    new Promise<string>((_, reject) => 
-                        setTimeout(() => reject(new Error('QR code timeout')), UserConfig.qrCodeTimeout * 1000)
-                    )
-                ]);
-                qrCodeReturn = qrCode;
-            } catch {
-                qrCodeReturn = undefined;
-            }
-
-        }
-
-        return {
-            instance: this.instance,
-            qrCode: qrCodeReturn,
-            pairingCode: pairingCodeReturn
-        };
-
-    }
-
-    private attachSocketErrorHandlers(){
-        try{
-            this.sock?.ws?.on?.('error', (err: any) => this.handleSocketError(err));
-            this.sock?.ws?.on?.('close', () => {
-                if(this.instance?.connectionStatus === 'ONLINE'){
-                    console.warn(`[${this.owner}/${this.instanceName}] ws closed unexpectedly`);
-                    this.handleSocketError(new Error('ws closed'));
-                }
-            });
-        }catch(e){
-            console.warn(`[${this.owner}/${this.instanceName}] Failed to register ws handlers`, e);
-        }
-
-        try{
-            const anySock: any = this.sock;
-            anySock?.options?.agent?.on?.('error', (err: any) => this.handleSocketError(err));
-            anySock?.options?.fetchAgent?.on?.('error', (err: any) => this.handleSocketError(err));
-        }catch(e){
-            console.warn(`[${this.owner}/${this.instanceName}] Failed to register agents handlers`, e);
-        }
-    }
-
-    private handleSocketError(err: any){
-        if(!err) return;
-        const msg = String(err?.message || '');
-        const code = err?.code;
-        const isUndici = code === 'UND_ERR_SOCKET' || /terminated/i.test(msg) || /other side closed/i.test(msg);
-        console.error(`[${this.owner}/${this.instanceName}] Socket/Fetch error captured`, { code, msg });
-        if(isUndici){
-            this.reconnectWithBackoff();
-        }
-    }
-
-    private async reconnectWithBackoff(){
-        if(this.instance?.connectionStatus === 'REMOVED') return;
-        if(this.reconnectAttempts >= this.maxReconnectAttempts){
-            console.error(`[${this.owner}/${this.instanceName}] Reconnection limit reached`);
-            return;
-        }
-        const wait = Math.min(30000, 1000 * 2 ** this.reconnectAttempts);
-        this.reconnectAttempts++;
-        console.log(`[${this.owner}/${this.instanceName}] Trying to reconnect in ${wait}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
-        await delay(wait);
-        try{
-            await this.create({ owner: this.owner, instanceName: this.instanceName, phoneNumber: this.phoneNumber });
-        }catch(e){
-            console.error(`[${this.owner}/${this.instanceName}] Reconnection failed`, e);
-        }
-    }
-
-    private registerGlobalHandlers(){
-        if(!(global as any).__zap_global_error_wrapped){
-            (global as any).__zap_global_error_wrapped = true;
-
-            process.on('uncaughtException', (err) => {
-                if(/terminated/i.test(String(err?.message))){
-                    console.error('UncaughtException (terminated) captured. Process preserved.');
-                }else{
-                    console.error('UncaughtException', err);
-                }
-            });
-
-            process.on('unhandledRejection', (reason: any) => {
-                if(/terminated/i.test(String(reason?.message))){
-                    console.error('UnhandledRejection (terminated) captured. Process preserved.');
-                }else{
-                    console.error('UnhandledRejection', reason);
-                }
-            });
-        }
-    }
-
-    async instanceEvents(saveCreds: () => Promise<void>){
-
-        this.sock.ev.on("creds.update", saveCreds as (data: BaileysEventMap["creds.update"]) => void);
-
-        this.sock.ev.on("connection.update", async (update: BaileysEventMap['connection.update']) => {
-            const { connection, lastDisconnect, qr } = update;
-
-            if(this.phoneNumber && qr){
-
-                await delay(1500);
-                const pairingCode = await this.sock.requestPairingCode(this.phoneNumber);
-
-                if(this.qrCodeCount > UserConfig.qrCodeLimit){
-
-                    console.log(`[${this.owner}/${this.instanceName}] PAIRING CODE LIMIT REACHED`);
-                    await trySendWebhook("pairingcode.limit", this.instance, { pairingCodeLimit: UserConfig.qrCodeLimit });
-
-                    await this.clearInstance();
-
-                }else{
-
-                    this.qrCodeCount++;
-                    console.log(`Pairing Code: ${pairingCode}`);
-
-                    await trySendWebhook("pairingcode.updated", this.instance, { pairingCode });
-
-                }
-
-            }else if(qr){
-
-                this.qrCodeCount++;
-
-                if(this.qrCodeCount > UserConfig.qrCodeLimit){
-
-                    console.log(`[${this.owner}/${this.instanceName}] QRCODE LIMIT REACHED`);
-
-                    await trySendWebhook("qrcode.limit", this.instance, { qrCodeLimit: UserConfig.qrCodeLimit });
-
-                    await this.clearInstance();
-
-                }else{
-
-                    const qrBase64 = await QRCode.toDataURL(qr);
-
-                    QRCode.toString(qr, { type: "utf8" }, (err, qrTerminal) => {
-                        if (!err){
-                            console.log(qrTerminal);
-                        }
-                    });
-                    
-                    if (this.qrCodeResolver) {
-                        this.qrCodeResolver(qrBase64);
-                        delete this.qrCodeResolver;
-                    }
-
-                    await trySendWebhook("qrcode.updated", this.instance, { qrCode: qrBase64 });
-
-                }
-
-            }else if(connection === "connecting"){
-
-                this.setStatus("OFFLINE");
-
-                await trySendWebhook("connection.connecting", this.instance, update);
-
-            }else if (connection === "open"){
-
-                this.setStatus("ONLINE");
-
-                const ppUrl = await this.getProfilePicture();
-                this.instance.profilePictureUrl = ppUrl;
-                
-                console.log(`[${this.owner}/${this.instanceName}] Connected to Whatsapp`);
-                
-                this.sock.sendPresenceUpdate('unavailable');
-
-                await delay(2);
-
-                await trySendWebhook("connection.open", this.instance, update);
-
-                if (this.qrCodeResolver) {
-                    this.qrCodeResolver('');
-                    delete this.qrCodeResolver;
-                }
-
-            }else if(connection === "close"){
-
-                this.setStatus("OFFLINE");
-
-                const reason = (lastDisconnect?.error as any)?.output?.statusCode;
-
-                const shouldReconnect = reason !== DisconnectReason.loggedOut;
-
-                if (shouldReconnect) {
-                    
-                    await trySendWebhook("connection.close", this.instance, reason);
-                    await this.create({ owner:this.owner, instanceName:this.instanceName, phoneNumber: this.phoneNumber});
-
-                } else {
-                    
-                    console.log(`[${this.owner}/${this.instanceName}] REMOVED`);
-                    console.log(`Reason: ${DisconnectReason[reason!]}`);
-
-                    await trySendWebhook("connection.removed", this.instance, reason);
-                    
-                    await this.clearInstance();
-
-                }
-            }
-        });
-
-        this.sock.ev.on("messaging-history.set", async({messages, chats, contacts}: BaileysEventMap['messaging-history.set']) => {
-
-            if(contacts && contacts.length > 0){
-                await PrismaConnection.saveManyContacts(`${this.instance.owner}_${this.instance.instanceName}`, contacts);
-                await trySendWebhook("contacts.set", this.instance, contacts);
-            }
-
-            if(chats && chats.length > 0){
-                await trySendWebhook("chats.set", this.instance, chats);
-            }
-
-            if(messages && messages.length > 0){
-
-                const rawMessages: MessageWebhook[] = [];
-
-                for(const msg of messages){
-
-                    if(msg.message?.protocolMessage || msg.message?.senderKeyDistributionMessage || !msg.message){
-                        continue;
-                    }
-
-                    const contentType = getContentType(msg?.message);
-
-                    if(!contentType){
-                        continue;
-                    }
-
-                    let timestamp = msg?.messageTimestamp;
-
-                    if(timestamp && typeof timestamp === 'object' && typeof timestamp.toNumber === 'function'){
-                        timestamp = timestamp.toNumber();
-                    }else if(timestamp && typeof timestamp === 'object' && 'low' in timestamp){
-                        timestamp = Number((timestamp as any).low) || 0;
-                    }else if(typeof timestamp !== 'number'){
-                        timestamp = 0;
-                    }
-
-                    msg.messageTimestamp = timestamp;
-
-                    rawMessages.push({
-                        ...msg,
-                        messageType: contentType
-                    });
-                }
-
-                const sanitized = messages.map(m => this.sanitizeWAMessage(m));
-                await PrismaConnection.saveManyMessages(`${this.instance.owner}_${this.instance.instanceName}`, sanitized);
-                trySendWebhook("messages.set", this.instance, rawMessages);
-            }
-
-        });
-
-        this.sock.ev.on("chats.upsert", async (chats: BaileysEventMap['chats.upsert']) => {
-            await trySendWebhook("chats.upsert", this.instance, chats);
-        });
-
-        this.sock.ev.on("chats.update", async (chats: BaileysEventMap['chats.update']) => {
-            await trySendWebhook("chats.update", this.instance, chats);
-        });
-
-        this.sock.ev.on("chats.delete", async (ids: BaileysEventMap['chats.delete']) => {
-            await trySendWebhook("chats.delete", this.instance, ids);
-        });
-
-        this.sock.ev.on("lid-mapping.update", async (mapping: BaileysEventMap['lid-mapping.update']) => {
-            await trySendWebhook("lid-mapping.update", this.instance, mapping);
-        });
-
-        this.sock.ev.on("presence.update", async (presence: BaileysEventMap['presence.update']) => {
-            await trySendWebhook("presence.update", this.instance, presence);
-        });
-
-        this.sock.ev.on("contacts.upsert", async (contacts: BaileysEventMap['contacts.upsert']) => {
-            await PrismaConnection.saveManyContacts(`${this.instance.owner}_${this.instance.instanceName}`, contacts);
-            await trySendWebhook("contacts.upsert", this.instance, contacts);
-        });
-
-        this.sock.ev.on("contacts.update", async (contacts: BaileysEventMap['contacts.update']) => {
-            await PrismaConnection.saveManyContacts(`${this.instance.owner}_${this.instance.instanceName}`, contacts);
-            await trySendWebhook("contacts.update", this.instance, contacts);
-        });
-
-        this.sock.ev.on("messages.upsert", async (messages: BaileysEventMap['messages.upsert']) => {
-            this.sock.sendPresenceUpdate('unavailable');
-
-            const rawMessages: MessageWebhook[] = [];
-
-            for(const msg of messages.messages){
-
-                if(!msg?.message){
-                    await this.sock.waitForMessage(msg.key.id!);
-                    continue;
-                }
-
-                const contentType = getContentType(msg?.message);
-
-                if(!contentType){
-                    continue;
-                }
-
-                let timestamp = msg?.messageTimestamp;
-
-                if(timestamp && typeof timestamp === 'object' && typeof timestamp.toNumber === 'function'){
-                    timestamp = timestamp.toNumber();
-                }else if(timestamp && typeof timestamp === 'object' && 'low' in timestamp){
-                    timestamp = Number((timestamp as any).low) || 0;
-                }else if(typeof timestamp !== 'number'){
-                    timestamp = 0;
-                }
-
-                msg.messageTimestamp = timestamp;
-
-                rawMessages.push({
-                    ...msg,
-                    messageType: contentType
-                });
-            }
-
-            const sanitized = messages.messages.map(m => this.sanitizeWAMessage(m));
-            await PrismaConnection.saveManyMessages(`${this.instance.owner}_${this.instance.instanceName}`, sanitized);
-            await trySendWebhook("messages.upsert", this.instance, rawMessages);
-            
-        });
-
-        this.sock.ev.on("messages.update", async (updates: BaileysEventMap['messages.update']) => {
-            
-            const nupdates = await Promise.all(
-                updates.map(async (message) => {
-                    const { key, update } = message;
-                    if(update.pollUpdates){
-                        const pollCreation = await PrismaConnection.getMessageById(key.id!) as any;
-                        if(pollCreation?.message){
-                            const pollVotes = getAggregateVotesInPollMessage({
-                                message: pollCreation.message, 
-                                pollUpdates: update.pollUpdates
-                            });
-
-                            const newUpdate = { 
-                                ...update, 
-                                pollVotes
-                            } as any;
-
-                            return { ...message, update: newUpdate } as Partial<WAMessage>;
-                            
-                        }
-                    }
-                    return message;
-                })
-            );
-
-            await trySendWebhook("messages.update", this.instance, nupdates);
-        });
-
-        this.sock.ev.on("messages.delete", async (deletes: BaileysEventMap['messages.delete']) => {
-            await trySendWebhook("messages.delete", this.instance, deletes);
-        });
-
-        this.sock.ev.on("messages.media-update", async (mediaUpdates: BaileysEventMap['messages.media-update']) => {
-            await trySendWebhook("messages.media-update", this.instance, mediaUpdates);
-        });
-
-        this.sock.ev.on("messages.reaction", async (reactions: BaileysEventMap['messages.reaction']) => {
-            await trySendWebhook("messages.reaction", this.instance, reactions);
-        });
-
-        this.sock.ev.on("message-receipt.update", async (receipts: BaileysEventMap['message-receipt.update']) => {
-            await trySendWebhook("message-receipt.update", this.instance, receipts);
-        });
-
-        this.sock.ev.on("groups.upsert", async (groups: BaileysEventMap['groups.upsert']) => {
-            await trySendWebhook("groups.upsert", this.instance, groups);
-        });
-
-        this.sock.ev.on("groups.update", async (groups: BaileysEventMap['groups.update']) => {
-            const [event] = groups;
-            const metadata = await this.sock.groupMetadata(event?.id!);
-            groupCache.set(event?.id!, metadata);
-            await trySendWebhook("groups.update", this.instance, groups);
-        });
-
-        this.sock.ev.on("group-participants.update", async (update: BaileysEventMap['group-participants.update']) => {
-            const metadata = await this.sock.groupMetadata(update.id);
-            groupCache.set(update.id, metadata);
-            await trySendWebhook("group-participants.update", this.instance, update);
-        });
-
-        this.sock.ev.on("group.join-request", async (request: BaileysEventMap['group.join-request']) => {
-            await trySendWebhook("group.join-request", this.instance, request);
-        });
-
-        this.sock.ev.on("blocklist.set", async (blocklist: BaileysEventMap['blocklist.set']) => {
-            await trySendWebhook("blocklist.set", this.instance, blocklist);
-        });
-
-        this.sock.ev.on("blocklist.update", async (update: BaileysEventMap['blocklist.update']) => {
-            await trySendWebhook("blocklist.update", this.instance, update);
-        });
-
-        this.sock.ev.on("call", async (calls: BaileysEventMap['call']) => {
-            await trySendWebhook("call", this.instance, calls);
-        });
-
-        this.sock.ev.on("labels.edit", async (label: BaileysEventMap['labels.edit']) => {
-            await trySendWebhook("labels.edit", this.instance, label);
-        });
-
-        this.sock.ev.on("labels.association", async (assoc: BaileysEventMap['labels.association']) => {
-            await trySendWebhook("labels.association", this.instance, assoc);
-        });
-
-        this.sock.ev.on("newsletter.reaction", async (reaction: BaileysEventMap['newsletter.reaction']) => {
-            await trySendWebhook("newsletter.reaction", this.instance, reaction);
-        });
-
-        this.sock.ev.on("newsletter.view", async (view: BaileysEventMap['newsletter.view']) => {
-            await trySendWebhook("newsletter.view", this.instance, view);
-        });
-
-        this.sock.ev.on("newsletter-participants.update", async (update: BaileysEventMap['newsletter-participants.update']) => {
-            await trySendWebhook("newsletter-participants.update", this.instance, update);
-        });
-
-        this.sock.ev.on("newsletter-settings.update", async (update: BaileysEventMap['newsletter-settings.update']) => {
-            await trySendWebhook("newsletter-settings.update", this.instance, update);
-        });
-
-
-    }
-
-    setStatus(status: ConnectionStatus): void{
-
-        this.instance.connectionStatus = status;
-        instanceStatus.set(this.key, status);
-
-    }
-
-    async clearInstance(){
-
-        try{
-
-            await this.sock?.ws?.close?.();
-
-            this.setStatus("REMOVED");
-
-            await clearInstanceWebhooks(`${this.owner}_${this.instanceName}`);
-            await removeInstancePath(this.instancePath);
-                        
-            PrismaConnection.deleteByInstance(`${this.owner}_${this.instanceName}`);
-
-            for(const event of baileysEvents){
-                this.sock?.ev.removeAllListeners(event);
-            }
-
-            delete instanceConnection[this.key];
-            delete instances[this.key];
-
-        }catch{
-            console.error("Error removing instance");
-        }
-
-    }
-
-    async getProfilePicture(): Promise<string | undefined> {
-        try {
-
-            const jid = this.sock?.user?.id;
-
-            if (!jid){
-                return undefined;
-            }
-
-            return await this.sock?.profilePictureUrl(jid, "image");
-
-        } catch {
-            return undefined;
-        }
-    }
-
-    async getMessage(key: string): Promise<proto.IMessage> {
-
-        await delay(2);
-
-        const message: WAMessage | undefined = await PrismaConnection.getMessageById(key);
-
-        if(message?.message){
-            return proto.Message.fromObject(message.message);
-        }
-
-        return proto.Message.fromObject({});
-
-    }
-
-    private deepSanitize(value: any): any {
-        if (value === null || value === undefined) return value;
-        if (typeof value === 'bigint') return Number(value);
-        if (typeof value === 'function') return undefined;
-        if (value instanceof Uint8Array) return Buffer.from(value).toString('base64');
-        if (Array.isArray(value)) {
-            return value.map(v => this.deepSanitize(v)).filter(v => v !== undefined);
-        }
-        if (typeof value === 'object') {
-            if ('low' in value && 'high' in value &&
-                typeof (value as any).low === 'number' &&
-                typeof (value as any).high === 'number') {
-                const low = (value as any).low >>> 0;
-                const high = (value as any).high >>> 0;
-                return high * 2 ** 32 + low;
-            }
-            const out: any = {};
-            for (const [k, v] of Object.entries(value)) {
-                const sv = this.deepSanitize(v);
-                if (sv !== undefined) out[k] = sv;
-            }
-            return out;
-        }
-        return value;
-    }
-
-    private sanitizeWAMessage(msg: any): any {
-        return this.deepSanitize(msg);
-    }
-
+  Browsers, DisconnectReason, getAggregateVotesInPollMessage, getContentType, PROCESSABLE_HISTORY_TYPES,
+  makeCacheableSignalKeyStore, proto, type BaileysEventMap, type GroupMetadata,
+  type WAMessage, type WAMessageKey, type WASocket,
+  type SignalDataTypeMap,
+} from '@whiskeysockets/baileys';
+import NodeCache from 'node-cache';
+import { pino } from 'pino';
+import QRCode from 'qrcode';
+import { randomUUID } from 'node:crypto';
+import { baileysEvents, instanceConnection, instances, instanceStatus, sessionsPath } from '../../shared/constants.js';
+import { instanceKey } from '../../shared/identity.js';
+import { genProxy, removeInstancePath, trySendWebhook } from '../../shared/utils.js';
+import type { ConnectionStatus, HistoryChunkMetadata, InstanceData, InstanceInfo } from '../../shared/types.js';
+import UserConfig from '../config/env.js';
+import PrismaConnection from '../../core/connection/prisma.js';
+import { loadInstanceAuth, safeSessionDirectory, type PersistentAuth } from '../state/auth-state.js';
+import { messageTimestamp, serializeBaileys, sourceEdit } from '../mappers/messageMapper.js';
+import { HistoryProgressTracker } from './history-progress.js';
+import { webhookChunks, WEBHOOK_CHUNK_ITEMS } from '../webhook/chunks.js';
+
+type StartData = { owner: string; instanceName: string; phoneNumber?: string | undefined };
+type ConnectResult = { instance: InstanceInfo; qrCode?: string; pairingCode?: string };
+type SocketConfig = Parameters<typeof makeWASocket>[0];
+export interface InstanceDependencies {
+  makeSocket: (config: SocketConfig) => WASocket;
+  loadAuth: (owner: string, name: string) => Promise<PersistentAuth>;
+  emit: typeof trySendWebhook;
+  store: Pick<typeof PrismaConnection, 'saveMessages' | 'saveManyMessages' | 'saveManyContacts' | 'getMessageById' | 'deleteByInstance' | 'saveManyChats' | 'deleteChats' | 'deleteMessages'>;
+  reconnectDelayMs: number;
+  qrTimeoutMs: number;
+  qrLimit: number;
+  removeSession: (owner: string, name: string) => Promise<void>;
 }
 
+/** One instance owns one socket, retry timer, auth state and set of caches. */
+export default class Instance {
+  private readonly dependencies: InstanceDependencies;
+  private sock: WASocket | undefined;
+  private instance: InstanceData | undefined;
+  private auth: PersistentAuth | undefined;
+  private owner = '';
+  private instanceName = '';
+  private key = '';
+  private phoneNumber: string | undefined;
+  private stopped = true;
+  private generation = 0;
+  private reconnectAttempts = 0;
+  private retryTimer: ReturnType<typeof setTimeout> | undefined;
+  private startTask: Promise<ConnectResult> | undefined;
+  private setupTask: Promise<void> | undefined;
+  private shutdownTask: Promise<void> | undefined;
+  private draining = false;
+  private eventTail: Promise<void> = Promise.resolve();
+  private eventTasks = new Set<Promise<void>>();
+  private socketOperations = new Set<Promise<unknown>>();
+  private qrCount = 0;
+  private pairingRequested = false;
+  private initialResolver: (() => void) | undefined;
+  private initial: Promise<void> = Promise.resolve();
+  private qrCode: string | undefined;
+  private pairingCode: string | undefined;
+  private history: HistoryProgressTracker | undefined;
+  private msgRetryCounterCache = new NodeCache({ stdTTL: 3600, checkperiod: 0, useClones: false });
+  private userDevicesCache = new NodeCache({ stdTTL: 300, checkperiod: 0, useClones: false });
+  private groupCache = new NodeCache({ stdTTL: 300, checkperiod: 0, useClones: false });
 
+  constructor(dependencies: Partial<InstanceDependencies> = {}) {
+    this.dependencies = {
+      makeSocket: makeWASocket, loadAuth: loadInstanceAuth, emit: trySendWebhook, store: PrismaConnection,
+      reconnectDelayMs: 1000, qrTimeoutMs: UserConfig.qrCodeTimeout * 1000, qrLimit: UserConfig.qrCodeLimit,
+      removeSession: async (owner, name) => {
+        try { await removeInstancePath(await safeSessionDirectory(sessionsPath, owner, name)); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      },
+      ...dependencies,
+    };
+  }
+
+  getSock(): WASocket | undefined { return this.sock; }
+
+  create(data: StartData): Promise<ConnectResult> {
+    const key = instanceKey(String(data.owner), String(data.instanceName));
+    if (this.key && this.key !== key) return Promise.reject(new Error('Instance identity cannot change'));
+    if (this.startTask) return this.startTask;
+    if (this.sock && !this.stopped) return Promise.resolve(this.result());
+    if (instances[key] && instances[key] !== this) return Promise.reject(new Error('Instance already exists'));
+    this.owner = String(data.owner); this.instanceName = String(data.instanceName); this.key = key;
+    this.phoneNumber = data.phoneNumber?.replace(/\D/g, '');
+    this.stopped = false;
+    this.qrCode = undefined; this.pairingCode = undefined; this.qrCount = 0; this.pairingRequested = false;
+    this.instance = { owner: this.owner, instanceName: this.instanceName, connectionStatus: 'OFFLINE' };
+    instances[key] = this; instanceConnection[key] = this.instance;
+    this.setStatus('OFFLINE');
+    this.initial = new Promise(resolve => { this.initialResolver = resolve; });
+    const task = this.startAndWait();
+    this.startTask = task;
+    void task.finally(() => { if (this.startTask === task) this.startTask = undefined; }).catch(() => {});
+    return task;
+  }
+
+  private async startAndWait(): Promise<ConnectResult> {
+    await this.startSocket();
+    if (this.auth?.state.creds.registered || this.stopped) return this.result();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([this.initial, new Promise<void>(resolve => { timer = setTimeout(resolve, Math.min(this.dependencies.qrTimeoutMs, 10_000)); })]);
+    } finally { if (timer) clearTimeout(timer); }
+    return this.result();
+  }
+
+  private startSocket(): Promise<void> {
+    if (this.setupTask) return this.setupTask;
+    const generation = ++this.generation;
+    const task = (async () => {
+      this.detachSocket();
+      this.auth ??= await this.dependencies.loadAuth(this.owner, this.instanceName);
+      if (this.stopped || generation !== this.generation) return;
+      const agents = await genProxy(UserConfig.proxyUrl);
+      if (this.stopped || generation !== this.generation) return;
+      const logger = pino({ level: 'silent' });
+      const client = UserConfig.sessionClient.toLowerCase();
+      const browser = ['windows', 'win32'].includes(client) ? Browsers.windows(UserConfig.sessionName)
+        : ['mac', 'macos', 'mac os', 'darwin'].includes(client) ? Browsers.macOS(UserConfig.sessionName)
+        : Browsers.ubuntu(UserConfig.sessionName);
+      const active = () => !this.stopped && generation === this.generation;
+      const auth = this.auth;
+      const history = new HistoryProgressTracker(Boolean(auth.state.creds.accountSyncCounter));
+      this.history = history;
+      const keys = {
+        get: <T extends keyof SignalDataTypeMap>(type: T, ids: string[]) => {
+          if (!active()) return Promise.reject(new Error('Socket is stopped'));
+          return this.trackOperation(() => Promise.resolve(auth.state.keys.get(type, ids)));
+        },
+        set: (data: Parameters<typeof auth.state.keys.set>[0]) => {
+          if (!active()) return Promise.reject(new Error('Socket is stopped'));
+          return this.trackOperation(() => Promise.resolve(auth.state.keys.set(data)));
+        },
+      };
+      // Release-pinned defaults avoid a remote version fetch on every reconnect.
+      const sock = this.dependencies.makeSocket({
+        auth: { creds: auth.state.creds, keys: makeCacheableSignalKeyStore(keys, logger) },
+        browser, emitOwnEvents: true,
+        markOnlineOnConnect: false, syncFullHistory: true, generateHighQualityLinkPreview: false,
+        shouldSyncHistoryMessage: notification => {
+          // Baileys also calls this hook with bare syncType capability probes.
+          // Only a real download/inline payload signals incoming history.
+          if (PROCESSABLE_HISTORY_TYPES.some(type => type === Number(notification.syncType)) && (notification.directPath || notification.initialHistBootstrapInlinePayload?.length)) {
+            this.queueEvent('messaging-history.notification', generation, async () => {
+              await this.emit('messaging-history.progress', history.download(notification), generation);
+            }, history);
+          }
+          return true;
+        },
+        msgRetryCounterCache: this.msgRetryCounterCache,
+        userDevicesCache: {
+          get: <T>(key: string) => this.userDevicesCache.get<T>(key),
+          set: <T>(key: string, value: T) => this.userDevicesCache.set(key, value),
+          del: (key: string) => this.userDevicesCache.del(key),
+          flushAll: () => this.userDevicesCache.flushAll(),
+        },
+        enableAutoSessionRecreation: true, maxMsgRetryCount: 5, retryRequestDelayMs: 3000,
+        logger, ...agents.wsAgent ? { agent: agents.wsAgent } : {}, ...agents.fetchAgent ? { fetchAgent: agents.fetchAgent } : {},
+        cachedGroupMetadata: async jid => this.groupCache.get<GroupMetadata>(jid),
+        getMessage: key => active() ? this.trackOperation(() => this.getMessage(key)) : Promise.resolve(undefined), qrTimeout: this.dependencies.qrTimeoutMs,
+      });
+      this.sock = sock;
+      this.instance!.socket = sock;
+      this.attachEvents(sock, generation, history);
+    })();
+    this.setupTask = task;
+    void task.finally(() => { if (this.setupTask === task) this.setupTask = undefined; }).catch(() => {});
+    return task;
+  }
+
+  private result(): ConnectResult {
+    const info = this.instance!;
+    return {
+      instance: { owner: info.owner, instanceName: info.instanceName, connectionStatus: info.connectionStatus,
+        ...(info.profilePictureUrl ? { profilePictureUrl: info.profilePictureUrl } : {}),
+        ...(info.instanceJid ? { instanceJid: info.instanceJid } : {}) },
+      ...(this.qrCode ? { qrCode: this.qrCode } : {}), ...(this.pairingCode ? { pairingCode: this.pairingCode } : {}),
+    };
+  }
+
+  private finishInitial(): void { this.initialResolver?.(); this.initialResolver = undefined; }
+
+  private trackOperation<T>(operation: () => Promise<T>): Promise<T> {
+    const task = operation();
+    this.socketOperations.add(task);
+    void task.finally(() => this.socketOperations.delete(task)).catch(() => {});
+    return task;
+  }
+
+  private detachSocket(): void {
+    const old = this.sock;
+    this.sock = undefined;
+    if (this.instance) delete this.instance.socket;
+    if (!old) return;
+    for (const event of baileysEvents) old.ev.removeAllListeners(event);
+    try { old.end(new Error('Local socket stopped')); } catch { /* Already closed. */ }
+  }
+
+  private queueEvent(event: string, generation: number, handler: () => Promise<void>, history: HistoryProgressTracker): void {
+    if (this.stopped || generation !== this.generation) return;
+    const task = this.eventTail.then(async () => {
+      if ((this.stopped || generation !== this.generation) && (!this.draining || event === 'connection.update')) return;
+      await handler();
+    }).catch(async () => {
+      // Payloads/errors may contain QR codes, tokens or message text.
+      console.error(`[${this.key}] Failed to process ${event}`);
+      this.stopped = true; this.generation++; this.detachSocket(); this.setStatus('OFFLINE'); this.finishInitial();
+      if (this.instance) {
+        const progress = event.startsWith('messaging-history.') ? history.failure() : history.snapshot('interrupted');
+        await this.dependencies.emit('messaging-history.progress', { ...this.instance }, progress)
+          .catch(() => console.error(`[${this.key}] Could not enqueue history interruption`));
+        await this.dependencies.emit('connection.error', { ...this.instance }, { event, error: 'EVENT_PROCESSING_FAILED' })
+          .catch(() => console.error(`[${this.key}] Could not enqueue connection.error`));
+      }
+    });
+    this.eventTail = task;
+    this.eventTasks.add(task);
+    void task.finally(() => this.eventTasks.delete(task));
+  }
+
+  private attachEvents(sock: WASocket, generation: number, history: HistoryProgressTracker): void {
+    const on = <K extends keyof BaileysEventMap>(event: K, handler: (data: BaileysEventMap[K]) => Promise<void>) => {
+      sock.ev.on(event, data => this.queueEvent(event, generation, () => handler(data), history));
+    };
+    const emit = (event: string, data: unknown, metadata?: HistoryChunkMetadata) => this.emit(event, data, generation, metadata);
+    on('creds.update', async () => { await this.auth!.saveCreds(); });
+    on('connection.update', async update => {
+      if (typeof update.receivedPendingNotifications === 'boolean') {
+        await emit('messaging-history.progress', history.pendingNotifications(update.receivedPendingNotifications));
+      }
+      if (update.qr && !sock.authState.creds.registered) {
+        if (++this.qrCount > this.dependencies.qrLimit) {
+          await emit(this.phoneNumber ? 'pairingcode.limit' : 'qrcode.limit', { qrCodeLimit: this.dependencies.qrLimit });
+          this.stopped = true; this.generation++; this.detachSocket(); this.setStatus('OFFLINE'); this.finishInitial();
+          return;
+        }
+        if (this.phoneNumber) {
+          if (!this.pairingRequested) {
+            this.pairingRequested = true;
+            try {
+              const pairingCode = await sock.requestPairingCode(this.phoneNumber);
+              if (this.stopped || generation !== this.generation) return;
+              this.pairingCode = pairingCode;
+              await emit('pairingcode.updated', { pairingCode });
+            } catch { this.pairingRequested = false; throw new Error('Pairing code request failed'); }
+          }
+        } else {
+          const qrCode = await QRCode.toDataURL(update.qr);
+          if (this.stopped || generation !== this.generation) return;
+          this.qrCode = qrCode;
+          await emit('qrcode.updated', { qrCode });
+        }
+        this.finishInitial();
+      }
+      if (update.connection === 'connecting') {
+        this.setStatus('OFFLINE'); await emit('connection.connecting', { connection: 'connecting' });
+      } else if (update.connection === 'open') {
+        this.reconnectAttempts = 0;
+        this.qrCode = undefined; this.pairingCode = undefined;
+        this.setStatus('ONLINE'); this.instance!.instanceJid = sock.user?.id ?? null;
+        this.finishInitial();
+        await this.auth!.saveCreds();
+        await emit('connection.open', { connection: 'open' });
+        await emit('messaging-history.progress', history.snapshot());
+        // Photo lookup failure must not suppress the connection event or block startup.
+        void this.getProfilePicture().catch(() => undefined);
+      } else if (update.connection === 'close') {
+        this.setStatus('OFFLINE');
+        const reason = (update.lastDisconnect?.error as { output?: { statusCode?: number } } | undefined)?.output?.statusCode;
+        const terminal = [DisconnectReason.loggedOut, DisconnectReason.badSession, DisconnectReason.connectionReplaced, DisconnectReason.forbidden, DisconnectReason.multideviceMismatch].includes(reason as DisconnectReason);
+        if (terminal) this.setStatus('REMOVED');
+        await emit('messaging-history.progress', history.snapshot('interrupted'));
+        await emit(terminal ? 'connection.removed' : 'connection.close', { reason: reason ?? null });
+        this.generation++;
+        this.detachSocket();
+        if (terminal) {
+          this.stopped = true;
+          this.setStatus('REMOVED'); this.finishInitial();
+          // Logging out invalidates only auth. Chat history survives until explicit DELETE.
+          if (reason === DisconnectReason.loggedOut || reason === DisconnectReason.badSession) await this.auth!.reset();
+        } else this.scheduleReconnect();
+      }
+    });
+    on('messaging-history.status', async data => { await emit('messaging-history.progress', history.providerStatus(data)); });
+    on('messaging-history.set', async ({ messages, chats, contacts, ...progress }) => {
+      const visibleMessages = this.webhookMessages(messages);
+      // Plan all chunks before announcing the watermark. Never silently skip an
+      // oversized entry, and count precisely the visible arrays that are sent.
+      const plans = { contacts: webhookChunks(contacts), chats: webhookChunks(chats), messages: webhookChunks(visibleMessages) };
+      const batchId = randomUUID();
+      const metadata = (event: string, index: number): HistoryChunkMetadata => ({ ...history.identity, batchId, chunkId: `${batchId}:${event}:${index}` });
+      await emit('messaging-history.progress', history.beginBatch(progress,
+        { contacts: contacts.length, chats: chats.length, messages: visibleMessages.length },
+        plans.contacts.length + plans.chats.length + plans.messages.length));
+      await emit('messaging-history.progress', history.snapshot('importing'));
+      for (const [index, chunk] of plans.contacts.entries()) {
+        await this.dependencies.store.saveManyContacts(this.key, chunk as typeof contacts);
+        await emit('contacts.set', chunk, metadata('contacts.set', index));
+      }
+      for (const [index, chunk] of plans.chats.entries()) {
+        await this.dependencies.store.saveManyChats(this.key, chunk as any);
+        await emit('chats.set', chunk, metadata('chats.set', index));
+      }
+      // Internal protocol messages remain available for Baileys getMessage,
+      // while only displayable messages contribute to the webhook watermark.
+      for (let offset = 0; offset < messages.length; offset += WEBHOOK_CHUNK_ITEMS) {
+        await this.dependencies.store.saveManyMessages(this.key, messages.slice(offset, offset + WEBHOOK_CHUNK_ITEMS));
+      }
+      for (const [index, chunk] of plans.messages.entries()) await emit('messages.set', chunk, metadata('messages.set', index));
+      await emit('messaging-history.progress', history.importedBatch());
+    });
+    on('messages.upsert', async ({ messages }) => {
+      await this.dependencies.store.saveManyMessages(this.key, messages);
+      const visible = this.webhookMessages(messages);
+      if (visible.length) await emit('messages.upsert', visible);
+    });
+    on('messages.update', async updates => {
+      const results = [];
+      for (const item of updates) {
+        const prior = item.key.id ? await this.dependencies.store.getMessageById(item.key.id, this.key, item.key.remoteJid ?? undefined) : undefined;
+        const stored = prior ? await this.dependencies.store.saveMessages(this.key, { ...prior, ...item.update, key: { ...prior.key, ...item.key } }) as any : undefined;
+        const marker = sourceEdit(stored?.content?.sourceEdit);
+        const update = marker ? { ...item.update, sourceEdit: marker } : item.update;
+        if (item.update.pollUpdates && prior?.message) {
+          results.push({ ...item, update: { ...update, pollVotes: getAggregateVotesInPollMessage({ message: prior.message, pollUpdates: item.update.pollUpdates }) } });
+        } else results.push({ ...item, update });
+      }
+      await emit('messages.update', results);
+    });
+    on('messages.delete', async data => { await this.dependencies.store.deleteMessages(this.key, data); await emit('messages.delete', data); });
+    on('chats.upsert', async data => { await this.dependencies.store.saveManyChats(this.key, data as any); await emit('chats.upsert', data); });
+    on('chats.update', async data => { await this.dependencies.store.saveManyChats(this.key, data as any); await emit('chats.update', data); });
+    on('chats.delete', async data => { await this.dependencies.store.deleteChats(this.key, data); await emit('chats.delete', data); });
+    on('contacts.upsert', async data => { await this.dependencies.store.saveManyContacts(this.key, data); await emit('contacts.upsert', data); });
+    on('contacts.update', async data => { await this.dependencies.store.saveManyContacts(this.key, data); await emit('contacts.update', data); });
+    on('lid-mapping.update', async data => {
+      // Baileys has already persisted forward/reverse Signal mappings via keys.set.
+      await this.dependencies.store.saveManyContacts(this.key, [{ id: data.lid, phoneNumber: data.pn }]);
+      await emit('lid-mapping.update', data);
+    });
+    on('groups.upsert', async data => { for (const group of data) this.groupCache.set(group.id, group); await emit('groups.upsert', data); });
+    on('groups.update', async data => { for (const group of data) if (group.id) this.groupCache.del(group.id); await emit('groups.update', data); });
+    on('group-participants.update', async data => { this.groupCache.del(data.id); await emit('group-participants.update', data); });
+    const passthrough = ['presence.update', 'messages.media-update', 'messages.reaction', 'message-receipt.update', 'group.join-request', 'blocklist.set', 'blocklist.update', 'call', 'labels.edit', 'labels.association', 'newsletter.reaction', 'newsletter.view', 'newsletter-participants.update', 'newsletter-settings.update'] as const;
+    for (const event of passthrough) on(event, data => emit(event, data));
+  }
+
+  private webhookMessages(messages: WAMessage[]): unknown[] {
+    return messages.filter(message => {
+      if (!message.message || message.message.senderKeyDistributionMessage) return false;
+      const protocol = message.message.protocolMessage;
+      return !protocol || protocol.type === proto.Message.ProtocolMessage.Type.REVOKE || protocol.type === proto.Message.ProtocolMessage.Type.MESSAGE_EDIT;
+    }).map(message => ({
+      ...serializeBaileys(message), messageTimestamp: messageTimestamp(message.messageTimestamp), messageType: getContentType(message.message!),
+    }));
+  }
+
+  private async emit(event: string, data: unknown, generation?: number, history?: HistoryChunkMetadata): Promise<void> {
+    if (!this.instance || (!this.draining && (this.stopped || (generation !== undefined && generation !== this.generation)))) return;
+    await this.dependencies.emit(event, { ...this.instance }, serializeBaileys(data), history);
+  }
+
+  private scheduleReconnect(): void {
+    if (this.stopped || this.retryTimer || this.reconnectAttempts >= 5) { this.finishInitial(); return; }
+    const wait = Math.min(30_000, this.dependencies.reconnectDelayMs * 2 ** this.reconnectAttempts++);
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = undefined;
+      if (this.stopped) return;
+      void this.startSocket().catch(() => {
+        console.error(`[${this.key}] Socket reconnect failed`);
+        this.scheduleReconnect();
+      });
+    }, wait);
+    this.retryTimer.unref();
+  }
+
+  setStatus(status: ConnectionStatus): void {
+    if (this.instance) this.instance.connectionStatus = status;
+    if (this.key) instanceStatus.set(this.key, status);
+  }
+
+  async reconnect(): Promise<ConnectResult> {
+    if (!this.key) throw new Error('Instance has not been created');
+    if (this.startTask) return this.startTask;
+    // The front polls connect for QR/status; polling must preserve a live socket.
+    if (!this.stopped && (this.sock || this.retryTimer || this.setupTask)) return this.result();
+    await this.shutdown();
+    this.reconnectAttempts = 0;
+    return this.create({ owner: this.owner, instanceName: this.instanceName, phoneNumber: this.phoneNumber });
+  }
+
+  /** Stops networking and drains writes without deleting credentials or message history. */
+  shutdown(): Promise<void> {
+    if (this.shutdownTask) return this.shutdownTask;
+    const task = this.performShutdown();
+    this.shutdownTask = task;
+    void task.finally(() => { if (this.shutdownTask === task) this.shutdownTask = undefined; }).catch(() => {});
+    return task;
+  }
+
+  private async performShutdown(): Promise<void> {
+    const activeHistory = this.sock ? this.history : undefined;
+    this.draining = true;
+    this.stopped = true;
+    this.generation++;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
+    this.finishInitial(); this.detachSocket();
+    try {
+      await this.setupTask?.catch(() => {});
+      this.detachSocket();
+      await Promise.all([...this.eventTasks]);
+      await Promise.allSettled([...this.socketOperations]);
+      await this.auth?.drain();
+      if (this.instance?.connectionStatus !== 'REMOVED') this.setStatus('OFFLINE');
+      if (activeHistory && this.instance) {
+        await this.dependencies.emit('messaging-history.progress', { ...this.instance }, activeHistory.snapshot('interrupted'));
+      }
+      this.msgRetryCounterCache.flushAll(); this.userDevicesCache.flushAll(); this.groupCache.flushAll();
+    } finally { this.draining = false; }
+  }
+
+  async clearInstance(): Promise<void> {
+    await this.shutdown();
+    await this.auth?.remove();
+    await this.dependencies.store.deleteByInstance(this.key);
+    await this.dependencies.removeSession(this.owner, this.instanceName);
+    this.setStatus('REMOVED');
+    if (this.instance) await this.dependencies.emit('connection.removed', { ...this.instance }, {});
+    delete instanceConnection[this.key]; delete instances[this.key];
+  }
+
+  async getProfilePicture(): Promise<string | undefined> {
+    const sock = this.sock;
+    const generation = this.generation;
+    if (!sock?.user?.id) return undefined;
+    try {
+      const url = await sock.profilePictureUrl(sock.user.id, 'image');
+      if (generation === this.generation && !this.stopped && this.instance) this.instance.profilePictureUrl = url;
+      return url;
+    } catch { return undefined; }
+  }
+
+  async getMessage(key: WAMessageKey | string): Promise<proto.IMessage | undefined> {
+    const id = typeof key === 'string' ? key : key.id;
+    if (!id) return undefined;
+    const remoteJid = typeof key === 'string' ? undefined : key.remoteJid ?? undefined;
+    const message = await this.dependencies.store.getMessageById(id, this.key, remoteJid);
+    return message?.message ? proto.Message.create(message.message) : undefined;
+  }
+
+  async publishSentMessage(sentMessage: WAMessage): Promise<void> {
+    if (!this.key || this.stopped) throw new Error('Instance is not connected');
+    await this.dependencies.store.saveMessages(this.key, sentMessage);
+    await this.emit('send.message', this.webhookMessages([sentMessage]));
+  }
+}
