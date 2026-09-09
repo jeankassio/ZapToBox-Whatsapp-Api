@@ -60,7 +60,12 @@ async function fixture(t: any, options: { registered?: boolean; overrides?: Part
     ...options.overrides,
   });
   t.after(async () => { await instance.shutdown(); delete instances[key]; delete instanceConnection[key]; instanceStatus.delete(key); });
-  const flush = async () => { await (instance as any).eventTail; };
+  const flush = async () => {
+    await (instance as any).eventTail;
+    // Recovery has an independent lifecycle/auth lane, including old accepted
+    // writes which no longer block the next socket's event queue.
+    while ((instance as any).eventTasks.size) await Promise.all([...(instance as any).eventTasks]);
+  };
   const start = async () => { const result = await instance.create({ owner, instanceName: 'one' }); if (auth.state.creds.registered) instance.setStatus('ONLINE'); return result; };
   return { instance, auth, sockets, webhooks, stored, lookups, store, key, owner, flush, start, deleted: () => deletes, pairingRequests: () => pairingRequests };
 }
@@ -357,14 +362,20 @@ test('failed or offline logout preserves credentials instead of claiming a succe
   assert.equal(f.auth.state.creds.registered, true); assert.equal(f.sockets[0].ended, 0);
 });
 
-test('event persistence failure disconnects and emits a redacted error notification', async t => {
+test('event persistence failure emits a redacted notification and recovers without revoking the device', async t => {
   const f = await fixture(t); await f.start();
   f.store.saveManyMessages = async () => { throw new Error('database-secret-message-text'); };
   f.sockets[0].ev.emit('messages.upsert', { messages: [{ key: { id: 'fail', remoteJid: '2@lid' }, message: { conversation: 'private' } }], type: 'notify' });
   await f.flush();
   assert.equal(f.instance.getSock(), undefined);
   assert.deepEqual(f.webhooks.at(-1), { event: 'connection.error', data: { event: 'messages.upsert', error: 'EVENT_PROCESSING_FAILED' } });
-  await sleep(15); assert.equal(f.sockets.length, 1);
+  assert.equal(instanceConnection[f.key]!.connectionState, 'reconnecting');
+  assert.equal(f.auth.state.creds.registered, true);
+  await sleep(15); assert.equal(f.sockets.length, 2);
+  f.store.saveManyMessages = async () => {};
+  f.sockets[1].ev.emit('connection.update', { connection: 'open' }); await f.flush();
+  assert.equal(instanceStatus.get(f.key), 'ONLINE');
+  assert.equal(instanceConnection[f.key]!.connectionState, 'connected');
 });
 
 test('group and device caches are isolated per instance', async t => {
@@ -484,4 +495,166 @@ test('resumed credentials identify a quiet reconnect without inventing an import
   assert.equal(snapshot.processedBatches, 0);
   assert.equal(snapshot.expectedChunks, 0);
   assert.deepEqual(snapshot.expected, { contacts: 0, chats: 0, messages: 0 });
+});
+
+test('bad-session and restart-required responses retain credentials and retry instead of inventing a logout', async t => {
+  for (const reason of [DisconnectReason.badSession, DisconnectReason.restartRequired]) {
+    const f = await fixture(t); await f.start();
+    const identity = Buffer.from(f.auth.state.creds.noiseKey.private);
+    f.sockets[0].ev.emit('connection.update', { connection: 'close', lastDisconnect: { error: { output: { statusCode: reason } } } });
+    assert.equal(instanceConnection[f.key]!.connectionState, 'reconnecting');
+    await f.flush(); await sleep(15);
+    assert.equal(f.sockets.length, 2);
+    assert.equal(f.auth.state.creds.registered, true);
+    assert.deepEqual(f.auth.state.creds.noiseKey.private, identity);
+    assert.equal(f.webhooks.some(event => event.event === 'connection.removed'), false);
+  }
+});
+
+test('replacement or refusal stops automatic retry while retaining authentication for explicit recovery', async t => {
+  for (const reason of [DisconnectReason.connectionReplaced, DisconnectReason.forbidden, DisconnectReason.multideviceMismatch]) {
+    const f = await fixture(t); await f.start();
+    const identity = Buffer.from(f.auth.state.creds.noiseKey.private);
+    f.sockets[0].ev.emit('connection.update', { connection: 'close', lastDisconnect: { error: { output: { statusCode: reason } } } });
+    await f.flush(); await sleep(15);
+    assert.equal(f.sockets.length, 1);
+    assert.equal(instanceStatus.get(f.key), 'OFFLINE');
+    assert.equal(instanceConnection[f.key]!.connectionState, 'disconnected');
+    assert.equal(f.auth.state.creds.registered, true);
+    assert.deepEqual(f.auth.state.creds.noiseKey.private, identity);
+    assert.equal(f.webhooks.some(event => event.event === 'connection.removed'), false);
+    await f.instance.reconnect();
+    assert.equal(f.sockets.length, 2);
+    assert.equal(instanceConnection[f.key]!.connectionState, 'reconnecting');
+  }
+});
+
+test('a slow old history write cannot delay recovery or close a replacement when it later fails', async t => {
+  const f = await fixture(t); await f.start();
+  const entered = deferred(), release = deferred();
+  t.after(() => release.resolve());
+  const save = f.store.saveManyMessages;
+  f.store.saveManyMessages = async (key, messages) => {
+    if (messages[0]?.key.id === 'old-failure') { entered.resolve(); await release.promise; throw new Error('old storage error'); }
+    await save(key, messages);
+  };
+  const old = f.sockets[0];
+  old.ev.emit('messaging-history.set', { messages: [{ key: { id: 'old-failure', remoteJid: '2@lid' }, message: { conversation: 'old' } }], chats: [], contacts: [], syncType: 3 });
+  await entered.promise;
+  old.ev.emit('connection.update', { connection: 'close' });
+  assert.equal(old.config.shouldSyncHistoryMessage({ syncType: 3, directPath: '/stale' }), false);
+  await sleep(15);
+  assert.equal(f.sockets.length, 2, 'socket replacement must not wait for the blocked history write');
+  const fresh = f.sockets[1];
+  fresh.ev.emit('connection.update', { connection: 'open' });
+  fresh.ev.emit('messages.upsert', { messages: [{ key: { id: 'fresh', remoteJid: '2@lid' }, message: { conversation: 'new' } }], type: 'notify' });
+  await (f.instance as any).eventTail;
+  assert.equal(f.stored.has(`${f.key}/fresh`), true);
+  release.resolve(); await f.flush();
+  assert.equal(f.instance.getSock(), fresh);
+  assert.equal(fresh.ended, 0);
+  assert.equal(instanceStatus.get(f.key), 'ONLINE');
+  assert.equal(f.webhooks.filter(event => event.event === 'connection.error').length, 0, 'an obsolete failure cannot announce the new socket offline');
+});
+
+test('credentials persist outside the history queue and replacement waits for pending authentication writes', async t => {
+  const f = await fixture(t); await f.start();
+  const entered = deferred(), release = deferred();
+  t.after(() => release.resolve());
+  const save = f.auth.saveCreds;
+  let writes = 0;
+  f.auth.saveCreds = async () => { if (++writes === 1) { entered.resolve(); await release.promise; } await save(); };
+  f.sockets[0].ev.emit('creds.update', {});
+  await entered.promise;
+  f.sockets[0].ev.emit('connection.update', { connection: 'close' });
+  await sleep(15);
+  assert.equal(f.sockets.length, 1, 'Signal credentials cannot be reused before their prior writes settle');
+  release.resolve(); await f.flush(); await sleep(15);
+  assert.equal(f.sockets.length, 2);
+  assert.equal(writes, 2, 'the replacement confirms current credentials were saved');
+  assert.equal(f.auth.state.creds.registered, true);
+});
+
+test('an old message-update lookup cannot overwrite a newer edit after socket replacement', async t => {
+  const f = await fixture(t); await f.start();
+  const key = { id: 'edited', remoteJid: '2@lid' };
+  await f.store.saveMessages(f.key, { key, message: { conversation: 'original' } });
+  const entered = deferred(), release = deferred();
+  t.after(() => release.resolve());
+  const lookup = f.store.getMessageById;
+  let count = 0;
+  f.store.getMessageById = async (...args) => {
+    const snapshot = await lookup(...args);
+    if (++count === 1) { entered.resolve(); await release.promise; }
+    return snapshot;
+  };
+  f.sockets[0].ev.emit('messages.update', [{ key, update: { message: { conversation: 'old edit' } } }]);
+  await entered.promise;
+  f.sockets[0].ev.emit('connection.update', { connection: 'close' });
+  await sleep(15);
+  f.sockets[1].ev.emit('connection.update', { connection: 'open' });
+  f.sockets[1].ev.emit('messages.update', [{ key, update: { message: { conversation: 'new edit' } } }]);
+  await (f.instance as any).eventTail;
+  assert.equal(f.stored.get(`${f.key}/edited`)!.message!.conversation, 'new edit');
+  release.resolve(); await f.flush();
+  assert.equal(f.stored.get(`${f.key}/edited`)!.message!.conversation, 'new edit');
+  assert.equal(f.webhooks.filter(event => event.event === 'messages.update').length, 1);
+});
+
+test('initial auth/setup failures retry without requiring another manual connect', async t => {
+  let loads = 0;
+  let f: Awaited<ReturnType<typeof fixture>>;
+  f = await fixture(t, { overrides: { loadAuth: async () => { if (++loads === 1) throw new Error('storage temporarily unavailable'); return f.auth; } } });
+  const result = await f.instance.create({ owner: f.owner, instanceName: 'one' });
+  assert.equal(result.instance.connectionState, 'reconnecting');
+  assert.equal(f.sockets.length, 0);
+  await sleep(15);
+  assert.equal(f.sockets.length, 1);
+  assert.equal(loads, 2);
+  assert.equal(f.auth.state.creds.registered, true);
+});
+
+test('a blocked message lookup is drained on shutdown but does not block the next authenticated socket', async t => {
+  const f = await fixture(t); await f.start();
+  const entered = deferred(), release = deferred();
+  t.after(() => release.resolve());
+  f.store.getMessageById = async () => { entered.resolve(); await release.promise; return undefined; };
+  const lookup = f.sockets[0].config.getMessage({ id: 'old-lookup', remoteJid: '2@lid' });
+  await entered.promise;
+  f.sockets[0].ev.emit('connection.update', { connection: 'close' });
+  await sleep(15);
+  assert.equal(f.sockets.length, 2);
+  let stopped = false;
+  const shutdown = f.instance.shutdown().then(() => { stopped = true; });
+  await tick(); assert.equal(stopped, false);
+  release.resolve(); await lookup; await shutdown;
+  assert.equal(stopped, true);
+});
+
+test('failed credentials persistence prevents reopening until storage recovers', async t => {
+  const f = await fixture(t, { overrides: { reconnectDelayMs: 1, reconnectMaxDelayMs: 1 } }); await f.start();
+  const save = f.auth.saveCreds;
+  f.auth.saveCreds = async () => { throw new Error('credentials storage unavailable'); };
+  f.sockets[0].ev.emit('creds.update', {}); await f.flush();
+  await sleep(15);
+  assert.equal(f.sockets.length, 1);
+  assert.equal(instanceConnection[f.key]!.connectionState, 'reconnecting');
+  assert.equal(f.auth.state.creds.registered, true);
+  f.auth.saveCreds = save;
+  await sleep(15);
+  assert.equal(f.sockets.length, 2);
+});
+
+test('rapid open-failure loops keep exponential backoff until a connection has been stable', async t => {
+  const f = await fixture(t, { overrides: { reconnectDelayMs: 1, reconnectMaxDelayMs: 1, random: () => 1 } }); await f.start();
+  for (let index = 0; index < 3; index++) {
+    const current = f.sockets.at(-1);
+    current.ev.emit('connection.update', { connection: 'open' }); await f.flush();
+    current.ev.emit('connection.update', { connection: 'close' }); await f.flush(); await sleep(10);
+    assert.equal((f.instance as any).reconnectAttempts, index + 1);
+  }
+  f.sockets.at(-1).ev.emit('connection.update', { connection: 'open' }); await f.flush();
+  (f.instance as any).connectedAt = Date.now() - 61_000;
+  f.sockets.at(-1).ev.emit('connection.update', { connection: 'close' }); await f.flush();
+  assert.equal((f.instance as any).reconnectAttempts, 1);
 });

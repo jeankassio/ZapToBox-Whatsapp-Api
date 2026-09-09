@@ -12,7 +12,7 @@ import { baileysEvents, instanceConnection, instances, instanceStatus, sessionsP
 import { instanceKey } from '../../shared/identity.js';
 import { publicInstanceInfo, updateConnectionStatus } from '../../shared/instance-info.js';
 import { genProxy, removeInstancePath, trySendWebhook } from '../../shared/utils.js';
-import type { ConnectionStatus, HistoryChunkMetadata, InstanceData, InstanceInfo } from '../../shared/types.js';
+import type { ConnectionState, ConnectionStatus, HistoryChunkMetadata, InstanceData, InstanceInfo } from '../../shared/types.js';
 import UserConfig from '../config/env.js';
 import PrismaConnection from '../../core/connection/prisma.js';
 import { loadInstanceAuth, safeSessionDirectory, type PersistentAuth } from '../state/auth-state.js';
@@ -32,6 +32,7 @@ export interface InstanceDependencies {
   store: Pick<typeof PrismaConnection, 'saveMessages' | 'saveManyMessages' | 'saveManyContacts' | 'getMessageById' | 'deleteByInstance' | 'saveManyChats' | 'deleteChats' | 'deleteMessages'>;
   reconnectDelayMs: number;
   reconnectMaxDelayMs: number;
+  random: () => number;
   qrTimeoutMs: number;
   qrLimit: number;
   removeSession: (owner: string, name: string) => Promise<void>;
@@ -51,6 +52,7 @@ export default class Instance {
   private revoked = false;
   private generation = 0;
   private reconnectAttempts = 0;
+  private connectedAt = 0;
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
   private startTask: Promise<ConnectResult> | undefined;
   private setupTask: Promise<void> | undefined;
@@ -59,6 +61,7 @@ export default class Instance {
   private eventTail: Promise<void> = Promise.resolve();
   private eventTasks = new Set<Promise<void>>();
   private socketOperations = new Set<Promise<unknown>>();
+  private authOperations = new Set<Promise<unknown>>();
   private qrCount = 0;
   private pairingRequested = false;
   private initialResolver: (() => void) | undefined;
@@ -73,7 +76,7 @@ export default class Instance {
   constructor(dependencies: Partial<InstanceDependencies> = {}) {
     this.dependencies = {
       makeSocket: makeWASocket, loadAuth: loadInstanceAuth, emit: trySendWebhook, store: PrismaConnection,
-      reconnectDelayMs: 1000, reconnectMaxDelayMs: 30_000, qrTimeoutMs: UserConfig.qrCodeTimeout * 1000, qrLimit: UserConfig.qrCodeLimit,
+      reconnectDelayMs: 1000, reconnectMaxDelayMs: 30_000, random: Math.random, qrTimeoutMs: UserConfig.qrCodeTimeout * 1000, qrLimit: UserConfig.qrCodeLimit,
       removeSession: async (owner, name) => {
         try { await removeInstancePath(await safeSessionDirectory(sessionsPath, owner, name)); }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
@@ -96,7 +99,7 @@ export default class Instance {
     this.qrCode = undefined; this.pairingCode = undefined; this.qrCount = 0; this.pairingRequested = false;
     this.instance = { owner: this.owner, instanceName: this.instanceName, connectionStatus: 'OFFLINE' };
     instances[key] = this; instanceConnection[key] = this.instance;
-    this.setStatus('OFFLINE');
+    this.setStatus('OFFLINE', this.auth?.state.creds.registered ? 'reconnecting' : 'pairing');
     this.initial = new Promise(resolve => { this.initialResolver = resolve; });
     const task = this.startAndWait();
     this.startTask = task;
@@ -105,7 +108,14 @@ export default class Instance {
   }
 
   private async startAndWait(): Promise<ConnectResult> {
-    await this.startSocket();
+    try { await this.startSocket(); }
+    catch {
+      if (!this.stopped) {
+        console.error(`[${this.key}] Socket setup failed; credentials preserved`);
+        this.scheduleReconnect();
+      }
+      return this.result();
+    }
     if (this.auth?.state.creds.registered || this.stopped) return this.result();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -119,7 +129,15 @@ export default class Instance {
     const generation = ++this.generation;
     const task = (async () => {
       this.detachSocket();
+      // Old history writes may finish independently. Authentication operations
+      // must settle before another socket can reuse the same Signal state.
+      await Promise.allSettled([...this.authOperations]);
+      await this.auth?.drain();
       this.auth ??= await this.dependencies.loadAuth(this.owner, this.instanceName);
+      if (this.stopped || generation !== this.generation) return;
+      this.setStatus('OFFLINE', this.auth.state.creds.registered ? 'reconnecting' : 'pairing');
+      // Retry a failed credentials write before reopening the transport.
+      if (this.auth.state.creds.registered) await this.auth.saveCreds();
       if (this.stopped || generation !== this.generation) return;
       const agents = await genProxy(UserConfig.proxyUrl);
       if (this.stopped || generation !== this.generation) return;
@@ -135,11 +153,11 @@ export default class Instance {
       const keys = {
         get: <T extends keyof SignalDataTypeMap>(type: T, ids: string[]) => {
           if (!active()) return Promise.reject(new Error('Socket is stopped'));
-          return this.trackOperation(() => Promise.resolve(auth.state.keys.get(type, ids)));
+          return this.trackOperation(() => Promise.resolve(auth.state.keys.get(type, ids)), true);
         },
         set: (data: Parameters<typeof auth.state.keys.set>[0]) => {
           if (!active()) return Promise.reject(new Error('Socket is stopped'));
-          return this.trackOperation(() => Promise.resolve(auth.state.keys.set(data)));
+          return this.trackOperation(() => Promise.resolve(auth.state.keys.set(data)), true);
         },
       };
       // Release-pinned defaults avoid a remote version fetch on every reconnect.
@@ -148,6 +166,7 @@ export default class Instance {
         browser, emitOwnEvents: true,
         markOnlineOnConnect: false, syncFullHistory: true, generateHighQualityLinkPreview: false,
         shouldSyncHistoryMessage: notification => {
+          if (!active() || this.sock?.ws?.isOpen === false) return false;
           // Baileys also calls this hook with bare syncType capability probes.
           // Only a real download/inline payload signals incoming history.
           if (PROCESSABLE_HISTORY_TYPES.some(type => type === Number(notification.syncType)) && (notification.directPath || notification.initialHistBootstrapInlinePayload?.length)) {
@@ -188,10 +207,11 @@ export default class Instance {
 
   private finishInitial(): void { this.initialResolver?.(); this.initialResolver = undefined; }
 
-  private trackOperation<T>(operation: () => Promise<T>): Promise<T> {
+  private trackOperation<T>(operation: () => Promise<T>, authentication = false): Promise<T> {
     const task = operation();
     this.socketOperations.add(task);
-    void task.finally(() => this.socketOperations.delete(task)).catch(() => {});
+    if (authentication) this.authOperations.add(task);
+    void task.finally(() => { this.socketOperations.delete(task); this.authOperations.delete(task); }).catch(() => {});
     return task;
   }
 
@@ -212,48 +232,85 @@ export default class Instance {
     }).catch(async () => {
       // Payloads/errors may contain QR codes, tokens or message text.
       console.error(`[${this.key}] Failed to process ${event}`);
-      this.stopped = true; this.generation++; this.detachSocket();
-      if (this.instance?.connectionStatus !== 'REMOVED') this.setStatus('OFFLINE');
-      this.finishInitial();
-      if (this.instance) {
-        const progress = event.startsWith('messaging-history.') ? history.failure() : history.snapshot('interrupted');
-        await this.dependencies.emit('messaging-history.progress', { ...this.instance }, progress)
-          .catch(() => console.error(`[${this.key}] Could not enqueue history interruption`));
-        await this.dependencies.emit('connection.error', { ...this.instance }, { event, error: 'EVENT_PROCESSING_FAILED' })
-          .catch(() => console.error(`[${this.key}] Could not enqueue connection.error`));
-      }
+      // A pending write from an old socket must never stop its replacement.
+      if (!this.stopped && generation === this.generation) this.closeSocket(generation, history, undefined, event);
     });
     this.eventTail = task;
     this.eventTasks.add(task);
-    void task.finally(() => this.eventTasks.delete(task));
+    void task.finally(() => this.eventTasks.delete(task)).catch(() => {});
+  }
+
+  private backgroundEvent(task: Promise<void>, label: string): void {
+    const handled = task.catch(() => console.error(`[${this.key}] Could not enqueue ${label}`));
+    this.eventTasks.add(handled);
+    void handled.finally(() => this.eventTasks.delete(handled));
+  }
+
+  private closeSocket(generation: number, history: HistoryProgressTracker, reason?: number, failedEvent?: string): void {
+    if (this.stopped || generation !== this.generation) return;
+    const revoked = reason === DisconnectReason.loggedOut;
+    // Replacement means another process owns this device; retrying would fight
+    // that process. These other refusals need attention but do not revoke auth.
+    const retry = !revoked && ![DisconnectReason.connectionReplaced, DisconnectReason.forbidden, DisconnectReason.multideviceMismatch].includes(reason as DisconnectReason);
+    // Repeated open→failure loops must also back off. Reset only after a stable
+    // minute, without allocating another timer per connected number.
+    if (this.connectedAt && Date.now() - this.connectedAt >= 60_000) this.reconnectAttempts = 0;
+    this.connectedAt = 0;
+    this.generation++;
+    this.stopped = !retry;
+    this.revoked = revoked;
+    this.setStatus(revoked ? 'REMOVED' : 'OFFLINE', retry ? (this.auth?.state.creds.registered ? 'reconnecting' : 'pairing') : 'disconnected');
+    this.detachSocket();
+    // Do not queue recovery behind a blocked message/history database write.
+    this.eventTail = Promise.resolve();
+    this.qrCode = undefined; this.pairingCode = undefined;
+    const snapshot = { ...this.instance! };
+    console.info(`[${this.key}] Transport closed code=${reason ?? 'unknown'} state=${snapshot.connectionState}${failedEvent ? ' cause=EVENT_PROCESSING_FAILED' : ''}`);
+    this.backgroundEvent(this.dependencies.emit(revoked ? 'connection.removed' : 'connection.close', snapshot,
+      { reason: reason ?? null, ...(failedEvent ? { error: 'EVENT_PROCESSING_FAILED' } : {}) }), 'connection closure');
+    const progress = failedEvent?.startsWith('messaging-history.') ? history.failure() : history.snapshot('interrupted');
+    this.backgroundEvent(this.dependencies.emit('messaging-history.progress', snapshot, progress), 'history interruption');
+    if (failedEvent) this.backgroundEvent(this.dependencies.emit('connection.error', snapshot, { event: failedEvent, error: 'EVENT_PROCESSING_FAILED' }), 'connection.error');
+    if (revoked) {
+      const pendingAuth = [...this.authOperations];
+      const reset = (async () => {
+        await Promise.allSettled(pendingAuth);
+        await this.auth?.drain();
+        await this.auth?.reset();
+        this.revoked = false;
+      })();
+      this.backgroundEvent(reset, 'revoked credentials reset');
+    }
+    if (retry) this.scheduleReconnect();
+    else this.finishInitial();
   }
 
   private attachEvents(sock: WASocket, generation: number, history: HistoryProgressTracker): void {
     let socketClosed = false;
+    const connected = () => !socketClosed && !this.stopped && generation === this.generation && this.sock === sock
+      && this.instance?.connectionStatus === 'ONLINE' && sock.ws?.isOpen !== false;
     const closeReason = (update: BaileysEventMap['connection.update']) => (update.lastDisconnect?.error as { output?: { statusCode?: number } } | undefined)?.output?.statusCode;
-    const isTerminal = (reason: number | undefined) => [DisconnectReason.loggedOut, DisconnectReason.badSession, DisconnectReason.connectionReplaced, DisconnectReason.forbidden, DisconnectReason.multideviceMismatch].includes(reason as DisconnectReason);
     const on = <K extends keyof BaileysEventMap>(event: K, handler: (data: BaileysEventMap[K]) => Promise<void>) => {
       sock.ev.on(event, data => {
-        // The accepted history batch still drains in order, but HTTP status and
-        // media operations must stop treating a closed transport as connected.
+        // Lifecycle and auth persistence cannot wait behind history imports.
+        if (event === 'creds.update') {
+          if (!socketClosed && !this.stopped && generation === this.generation) {
+            const saving = this.trackOperation(() => this.auth!.saveCreds(), true);
+            this.backgroundEvent(saving.catch(() => {
+              this.closeSocket(generation, history, undefined, 'creds.update');
+            }), 'credentials update');
+          }
+          return;
+        }
         if (event === 'connection.update' && !this.stopped && generation === this.generation) {
           if (socketClosed) return;
           const update = data as BaileysEventMap['connection.update'];
           if (update.connection === 'close') {
             socketClosed = true;
-            const reason = closeReason(update), terminal = isTerminal(reason);
-            this.setStatus(terminal ? 'REMOVED' : 'OFFLINE');
-            this.revoked = terminal && (reason === DisconnectReason.loggedOut || reason === DisconnectReason.badSession);
-            // Snapshot and persist this notification independently of accepted
-            // history writes. The outbox gives lifecycle its own durable lane.
-            const notification = this.dependencies.emit(terminal ? 'connection.removed' : 'connection.close', { ...this.instance! }, { reason: reason ?? null })
-              .catch(() => console.error(`[${this.key}] Could not enqueue connection closure`));
-            this.eventTasks.add(notification);
-            void notification.finally(() => this.eventTasks.delete(notification));
-            this.detachSocket();
-            if (terminal) this.finishInitial();
-          } else if (update.connection === 'open') this.setStatus('ONLINE');
-          else if (update.connection === 'connecting') this.setStatus('OFFLINE');
+            this.closeSocket(generation, history, closeReason(update));
+            return;
+          } else if (update.connection === 'open') { this.connectedAt = Date.now(); this.setStatus('ONLINE'); }
+          else if (update.connection === 'connecting') this.setStatus('OFFLINE', this.auth?.state.creds.registered ? 'reconnecting' : 'pairing');
         }
         this.queueEvent(event, generation, () => {
           if (socketClosed && event !== 'connection.update') return Promise.resolve();
@@ -299,33 +356,20 @@ export default class Instance {
       if (update.connection === 'connecting') {
         await emit('connection.connecting', { connection: 'connecting' });
       } else if (update.connection === 'open') {
-        this.reconnectAttempts = 0;
         this.qrCode = undefined; this.pairingCode = undefined;
         this.instance!.instanceJid = sock.user?.id ?? null;
         this.finishInitial();
-        await this.auth!.saveCreds();
-        if (socketClosed) return;
+        await this.trackOperation(() => this.auth!.saveCreds(), true);
+        if (socketClosed || this.stopped || generation !== this.generation) return;
+        console.info(`[${this.key}] Transport connected`);
         await emit('connection.open', { connection: 'open' });
         await emit('messaging-history.progress', history.snapshot());
         // Photo lookup failure must not suppress the connection event or block startup.
         void this.getProfilePicture().catch(() => undefined);
-      } else if (update.connection === 'close') {
-        const reason = closeReason(update);
-        const terminal = isTerminal(reason);
-        await emit('messaging-history.progress', history.snapshot('interrupted'));
-        this.generation++;
-        this.detachSocket();
-        if (terminal) {
-          this.stopped = true;
-          this.setStatus('REMOVED'); this.finishInitial();
-          // Logging out invalidates only auth. Chat history survives until explicit DELETE.
-          if (this.revoked) { await this.auth!.reset(); this.revoked = false; }
-        } else this.scheduleReconnect();
       }
     });
     on('messaging-history.status', async data => { await emit('messaging-history.progress', history.providerStatus(data)); });
     on('messaging-history.set', async ({ messages, chats, contacts, ...progress }) => {
-      const connected = () => !socketClosed && this.sock === sock && this.instance?.connectionStatus === 'ONLINE' && sock.ws?.isOpen !== false;
       if (!connected()) return;
       const visibleMessages = this.webhookMessages(messages);
       // Plan all chunks before announcing the watermark. Never silently skip an
@@ -377,7 +421,11 @@ export default class Instance {
     on('messages.update', async updates => {
       const results = [];
       for (const item of updates) {
+        if (!connected()) return;
         const prior = item.key.id ? await this.dependencies.store.getMessageById(item.key.id, this.key, item.key.remoteJid ?? undefined) : undefined;
+        // A previous generation may finish its lookup after the replacement
+        // already stored a newer edit. Never write that stale snapshot back.
+        if (!connected()) return;
         const stored = prior ? await this.dependencies.store.saveMessages(this.key, { ...prior, ...item.update, key: { ...prior.key, ...item.key } }) as any : undefined;
         // A renewed download URL changes stored transport metadata, not the message's text.
         if ((item.update as { mediaMetadataOnly?: boolean }).mediaMetadataOnly === true) continue;
@@ -393,9 +441,11 @@ export default class Instance {
     on('messages.media-update', async data => {
       const results = [];
       for (const item of data) {
+        if (!connected()) return;
         let error: { code: string } | undefined;
         try {
           const prior = item.key.id ? await this.dependencies.store.getMessageById(item.key.id, this.key, item.key.remoteJid ?? undefined) : undefined;
+          if (!connected()) return;
           if (!prior) throw new RequestError(404, 'Message not found.');
           renewedMediaPath(prior, item);
         } catch (failure) {
@@ -443,7 +493,10 @@ export default class Instance {
     if (this.stopped || this.retryTimer) { this.finishInitial(); return; }
     // A temporary network outage can last hours. Keep retrying registered
     // sessions with capped backoff; terminal logout reasons never reach here.
-    const wait = Math.min(this.dependencies.reconnectMaxDelayMs, this.dependencies.reconnectDelayMs * 2 ** Math.min(this.reconnectAttempts++, 16));
+    const ceiling = Math.min(this.dependencies.reconnectMaxDelayMs, this.dependencies.reconnectDelayMs * 2 ** Math.min(this.reconnectAttempts++, 16));
+    const wait = Math.max(1, Math.round(ceiling * (0.5 + this.dependencies.random() * 0.5)));
+    this.setStatus('OFFLINE', this.auth?.state.creds.registered || !this.auth ? 'reconnecting' : 'pairing');
+    console.info(`[${this.key}] Reconnect attempt=${this.reconnectAttempts} delayMs=${wait}`);
     this.retryTimer = setTimeout(() => {
       this.retryTimer = undefined;
       if (this.stopped) return;
@@ -455,8 +508,8 @@ export default class Instance {
     this.retryTimer.unref();
   }
 
-  setStatus(status: ConnectionStatus): void {
-    if (this.instance) updateConnectionStatus(this.instance, status);
+  setStatus(status: ConnectionStatus, state?: ConnectionState): void {
+    if (this.instance) updateConnectionStatus(this.instance, status, state);
     if (this.key) instanceStatus.set(this.key, status);
   }
 

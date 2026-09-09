@@ -214,7 +214,7 @@ test('list, status and repeated create expose public instance fields even with a
   const listed = await f.request('/instances/get', { token: scoped() });
   const connectionUpdatedAt = listed.body.data[0].connectionUpdatedAt;
   assert.ok(Number.isFinite(Date.parse(connectionUpdatedAt)));
-  const expected = { owner: 'owner', instanceName: 'session', connectionStatus: 'ONLINE', connectionUpdatedAt, profilePictureUrl: 'https://example.com/photo.jpg', instanceJid: '5511999999999@s.whatsapp.net' };
+  const expected = { owner: 'owner', instanceName: 'session', connectionStatus: 'ONLINE', connectionState: 'connected', connectionUpdatedAt, profilePictureUrl: 'https://example.com/photo.jpg', instanceJid: '5511999999999@s.whatsapp.net' };
   assert.equal(listed.status, 200);
   assert.deepEqual(listed.body.data, [expected]);
   const found = await f.request('/instances/status/owner/session', { token: scoped() });
@@ -229,11 +229,16 @@ test('list, status and repeated create expose public instance fields even with a
   socket.ws = { isOpen: false };
   const disconnected = await f.request('/instances/status/owner/session', { token: scoped() });
   assert.equal(disconnected.body.data.connectionStatus, 'OFFLINE', 'a closed socket overrides an old queued ONLINE snapshot');
-  assert.ok(Date.parse(disconnected.body.data.connectionUpdatedAt) > Date.parse(connectionUpdatedAt));
+  assert.equal(disconnected.body.data.connectionState, 'reconnecting');
+  assert.equal(disconnected.body.data.connectionUpdatedAt, connectionUpdatedAt, 'a status read never invents a lifecycle transition');
+  assert.equal(instanceConnection[instance.key]!.connectionStatus, 'ONLINE', 'HTTP observations do not mutate the socket owner state');
   assert.ok(Date.parse(disconnected.body.observedAt) >= Date.parse(disconnected.body.data.connectionUpdatedAt));
   const disconnectedList = await f.request('/instances/get', { token: scoped() });
   assert.equal(disconnectedList.body.data[0].connectionStatus, 'OFFLINE');
   assert.equal(disconnectedList.body.data[0].connectionUpdatedAt, disconnected.body.data.connectionUpdatedAt);
+  socket.ws.isOpen = true;
+  const connectedAgain = await f.request('/instances/status/owner/session', { token: scoped() });
+  assert.equal(connectedAgain.body.data.connectionStatus, 'ONLINE', 'a transient transport observation cannot freeze the instance offline');
 });
 
 test('legacy GET connect and POST connect return the existing cached QR instance', async t => {

@@ -59,6 +59,7 @@ export async function trySendWebhook(event:string,instance:InstanceData,data:unk
   void discarded?.catch(() => console.error('Could not clear disconnected instance work.'));
   const info = {
     owner:instance.owner,instanceName:instance.instanceName,connectionStatus:instance.connectionStatus,
+    ...(instance.connectionState ? {connectionState:instance.connectionState} : {}),
     ...(instance.connectionUpdatedAt ? {connectionUpdatedAt:instance.connectionUpdatedAt} : {}),
     profilePictureUrl:instance.profilePictureUrl,
     instanceJid:jidNormalizedUser(instance.socket?.user?.id ?? instance.instanceJid ?? '') || null,

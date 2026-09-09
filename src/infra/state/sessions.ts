@@ -3,11 +3,22 @@ import path from 'node:path';
 import { instances, sessionsPath } from '../../shared/constants.js';
 import { instanceKey, validateIdentity } from '../../shared/identity.js';
 import Instance from '../baileys/services.js';
-import { listDatabaseSessions, loadInstanceAuth, safeSessionDirectory } from './auth-state.js';
+import { listDatabaseSessions, loadInstanceAuth, safeSessionDirectory, type PersistentAuth } from './auth-state.js';
 import PrismaConnection from '../../core/connection/prisma.js';
 import UserConfig from '../config/env.js';
 
 type SessionPair = { owner: string; instanceName: string };
+interface SessionDependencies {
+  discoverFiles: () => Promise<SessionPair[]>;
+  discoverDatabase: () => Promise<SessionPair[]>;
+  useDatabase: () => boolean;
+  migrate: (owner: string, name: string) => Promise<unknown>;
+  loadAuth: typeof loadInstanceAuth;
+  createInstance: (auth: PersistentAuth) => Instance;
+  retryDelayMs: number;
+  retryMaxDelayMs: number;
+  random: () => number;
+}
 
 export function ambiguousLegacyKeys(pairs: SessionPair[]): Set<string> {
   const keys = new Map<string, Set<string>>();
@@ -40,20 +51,51 @@ export async function discoverFileSessions(root: string): Promise<SessionPair[]>
 export default class Sessions {
   private stopped = false;
   private starting: Promise<void> | undefined;
+  private retryTimer: ReturnType<typeof setTimeout> | undefined;
+  private attempts = 0;
+  private readonly dependencies: SessionDependencies;
+
+  constructor(dependencies: Partial<SessionDependencies> = {}) {
+    this.dependencies = {
+      discoverFiles: () => discoverFileSessions(sessionsPath), discoverDatabase: listDatabaseSessions,
+      useDatabase: () => UserConfig.authStore === 'database',
+      migrate: (owner, name) => PrismaConnection.migrateLegacyInstanceKey(owner, name),
+      loadAuth: loadInstanceAuth, createInstance: auth => new Instance({ loadAuth: async () => auth }),
+      retryDelayMs: 1000, retryMaxDelayMs: 30_000, random: Math.random,
+      ...dependencies,
+    };
+  }
 
   start(): Promise<void> {
     if (this.starting) return this.starting;
-    const task = this.restore();
+    if (this.stopped) return Promise.resolve();
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
+    const task = this.restore().catch(() => {
+      console.error('Session discovery failed; stored credentials preserved');
+      this.scheduleRetry();
+    });
     this.starting = task;
+    void task.finally(() => { if (this.starting === task) this.starting = undefined; });
     return task;
+  }
+
+  private scheduleRetry(): void {
+    if (this.stopped || this.retryTimer) return;
+    const ceiling = Math.min(this.dependencies.retryMaxDelayMs, this.dependencies.retryDelayMs * 2 ** Math.min(this.attempts++, 16));
+    const delay = Math.max(1, Math.round(ceiling * (0.5 + this.dependencies.random() * 0.5)));
+    console.info(`Session restore retry attempt=${this.attempts} delayMs=${delay}`);
+    this.retryTimer = setTimeout(() => { this.retryTimer = undefined; void this.start(); }, delay);
+    this.retryTimer.unref();
   }
 
   private async restore(): Promise<void> {
     const all = new Map<string, SessionPair>();
-    for (const pair of await discoverFileSessions(sessionsPath)) all.set(instanceKey(pair.owner, pair.instanceName), pair);
-    if (UserConfig.authStore === 'database') {
-      for (const pair of await listDatabaseSessions()) all.set(instanceKey(pair.owner, pair.instanceName), pair);
+    for (const pair of await this.dependencies.discoverFiles()) all.set(instanceKey(pair.owner, pair.instanceName), pair);
+    if (this.dependencies.useDatabase()) {
+      for (const pair of await this.dependencies.discoverDatabase()) all.set(instanceKey(pair.owner, pair.instanceName), pair);
     }
+    let failed = false;
     const ambiguous = ambiguousLegacyKeys([...all.values()]);
     for (const [key, pair] of all) {
       if (this.stopped) break;
@@ -64,16 +106,17 @@ export default class Sessions {
       if (instances[key]) continue;
       let startedInstance: Instance | undefined;
       try {
-        await PrismaConnection.migrateLegacyInstanceKey(pair.owner, pair.instanceName);
-        const auth = await loadInstanceAuth(pair.owner, pair.instanceName);
+        await this.dependencies.migrate(pair.owner, pair.instanceName);
+        const auth = await this.dependencies.loadAuth(pair.owner, pair.instanceName);
         // Unpaired/expired entries remain available in the REST listing for manual connect.
         if (this.stopped || !auth.state.creds.registered) { await auth.drain(); continue; }
-        const instance = new Instance({ loadAuth: async () => auth });
+        const instance = this.dependencies.createInstance(auth);
         if (this.stopped) break;
         if (instances[key]) continue;
         startedInstance = instance;
         await instance.create(pair);
       } catch {
+        failed = true;
         console.error(`[${key}] Session restore failed; preserved stored credentials and history`);
         if (startedInstance) {
           await startedInstance.shutdown();
@@ -81,10 +124,14 @@ export default class Sessions {
         }
       }
     }
+    if (failed) this.scheduleRetry();
+    else this.attempts = 0;
   }
 
   async shutdown(): Promise<void> {
     this.stopped = true;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
     // Stop current sockets promptly, then catch any setup that was already in progress.
     await Promise.all(Object.values(instances).map(instance => instance.shutdown()));
     await this.starting?.catch(() => {});

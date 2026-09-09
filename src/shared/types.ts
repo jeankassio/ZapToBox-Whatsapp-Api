@@ -2,12 +2,15 @@ import {WAMessage, WAMessageKey, WASocket} from "@whiskeysockets/baileys";
 import { BlobOptions } from "buffer";
 
 export type ConnectionStatus = "ONLINE" | "OFFLINE" | "REMOVED";
+export type ConnectionState = 'connected' | 'reconnecting' | 'pairing' | 'disconnected';
 export type StatusPresence = "available" | "unavailable" | "composing" | "recording" | "paused";
 
 export interface InstanceInfo {
   instanceName: string;
   owner: string;
   connectionStatus: ConnectionStatus;
+  /** Distinguishes retained credentials under recovery from a revoked or stopped session. */
+  connectionState?: ConnectionState;
   /** Time the current transport state was observed, independent of webhook delivery delays. */
   connectionUpdatedAt?: string;
   profilePictureUrl?: string | undefined;
