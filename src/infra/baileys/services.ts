@@ -10,6 +10,7 @@ import QRCode from 'qrcode';
 import { randomUUID } from 'node:crypto';
 import { baileysEvents, instanceConnection, instances, instanceStatus, sessionsPath } from '../../shared/constants.js';
 import { instanceKey } from '../../shared/identity.js';
+import { publicInstanceInfo, updateConnectionStatus } from '../../shared/instance-info.js';
 import { genProxy, removeInstancePath, trySendWebhook } from '../../shared/utils.js';
 import type { ConnectionStatus, HistoryChunkMetadata, InstanceData, InstanceInfo } from '../../shared/types.js';
 import UserConfig from '../config/env.js';
@@ -30,6 +31,7 @@ export interface InstanceDependencies {
   emit: typeof trySendWebhook;
   store: Pick<typeof PrismaConnection, 'saveMessages' | 'saveManyMessages' | 'saveManyContacts' | 'getMessageById' | 'deleteByInstance' | 'saveManyChats' | 'deleteChats' | 'deleteMessages'>;
   reconnectDelayMs: number;
+  reconnectMaxDelayMs: number;
   qrTimeoutMs: number;
   qrLimit: number;
   removeSession: (owner: string, name: string) => Promise<void>;
@@ -46,6 +48,7 @@ export default class Instance {
   private key = '';
   private phoneNumber: string | undefined;
   private stopped = true;
+  private revoked = false;
   private generation = 0;
   private reconnectAttempts = 0;
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -70,7 +73,7 @@ export default class Instance {
   constructor(dependencies: Partial<InstanceDependencies> = {}) {
     this.dependencies = {
       makeSocket: makeWASocket, loadAuth: loadInstanceAuth, emit: trySendWebhook, store: PrismaConnection,
-      reconnectDelayMs: 1000, qrTimeoutMs: UserConfig.qrCodeTimeout * 1000, qrLimit: UserConfig.qrCodeLimit,
+      reconnectDelayMs: 1000, reconnectMaxDelayMs: 30_000, qrTimeoutMs: UserConfig.qrCodeTimeout * 1000, qrLimit: UserConfig.qrCodeLimit,
       removeSession: async (owner, name) => {
         try { await removeInstancePath(await safeSessionDirectory(sessionsPath, owner, name)); }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
@@ -178,9 +181,7 @@ export default class Instance {
   private result(): ConnectResult {
     const info = this.instance!;
     return {
-      instance: { owner: info.owner, instanceName: info.instanceName, connectionStatus: info.connectionStatus,
-        ...(info.profilePictureUrl ? { profilePictureUrl: info.profilePictureUrl } : {}),
-        instanceJid: info.instanceJid ?? null },
+      instance: publicInstanceInfo(info),
       ...(this.qrCode ? { qrCode: this.qrCode } : {}), ...(this.pairingCode ? { pairingCode: this.pairingCode } : {}),
     };
   }
@@ -211,7 +212,9 @@ export default class Instance {
     }).catch(async () => {
       // Payloads/errors may contain QR codes, tokens or message text.
       console.error(`[${this.key}] Failed to process ${event}`);
-      this.stopped = true; this.generation++; this.detachSocket(); this.setStatus('OFFLINE'); this.finishInitial();
+      this.stopped = true; this.generation++; this.detachSocket();
+      if (this.instance?.connectionStatus !== 'REMOVED') this.setStatus('OFFLINE');
+      this.finishInitial();
       if (this.instance) {
         const progress = event.startsWith('messaging-history.') ? history.failure() : history.snapshot('interrupted');
         await this.dependencies.emit('messaging-history.progress', { ...this.instance }, progress)
@@ -226,12 +229,41 @@ export default class Instance {
   }
 
   private attachEvents(sock: WASocket, generation: number, history: HistoryProgressTracker): void {
+    let socketClosed = false;
+    const closeReason = (update: BaileysEventMap['connection.update']) => (update.lastDisconnect?.error as { output?: { statusCode?: number } } | undefined)?.output?.statusCode;
+    const isTerminal = (reason: number | undefined) => [DisconnectReason.loggedOut, DisconnectReason.badSession, DisconnectReason.connectionReplaced, DisconnectReason.forbidden, DisconnectReason.multideviceMismatch].includes(reason as DisconnectReason);
     const on = <K extends keyof BaileysEventMap>(event: K, handler: (data: BaileysEventMap[K]) => Promise<void>) => {
-      sock.ev.on(event, data => this.queueEvent(event, generation, () => handler(data), history));
+      sock.ev.on(event, data => {
+        // The accepted history batch still drains in order, but HTTP status and
+        // media operations must stop treating a closed transport as connected.
+        if (event === 'connection.update' && !this.stopped && generation === this.generation) {
+          if (socketClosed) return;
+          const update = data as BaileysEventMap['connection.update'];
+          if (update.connection === 'close') {
+            socketClosed = true;
+            const reason = closeReason(update), terminal = isTerminal(reason);
+            this.setStatus(terminal ? 'REMOVED' : 'OFFLINE');
+            this.revoked = terminal && (reason === DisconnectReason.loggedOut || reason === DisconnectReason.badSession);
+            // Snapshot and persist this notification independently of accepted
+            // history writes. The outbox gives lifecycle its own durable lane.
+            const notification = this.dependencies.emit(terminal ? 'connection.removed' : 'connection.close', { ...this.instance! }, { reason: reason ?? null })
+              .catch(() => console.error(`[${this.key}] Could not enqueue connection closure`));
+            this.eventTasks.add(notification);
+            void notification.finally(() => this.eventTasks.delete(notification));
+            this.detachSocket();
+            if (terminal) this.finishInitial();
+          } else if (update.connection === 'open') this.setStatus('ONLINE');
+          else if (update.connection === 'connecting') this.setStatus('OFFLINE');
+        }
+        this.queueEvent(event, generation, () => handler(data), history);
+      });
     };
     const emit = (event: string, data: unknown, metadata?: HistoryChunkMetadata) => this.emit(event, data, generation, metadata);
     on('creds.update', async () => { await this.auth!.saveCreds(); });
     on('connection.update', async update => {
+      // An open/QR event can already be waiting behind a large history import
+      // when the phone revokes this device. It must never revive that socket.
+      if (socketClosed && update.connection !== 'close') return;
       if (typeof update.receivedPendingNotifications === 'boolean') {
         await emit('messaging-history.progress', history.pendingNotifications(update.receivedPendingNotifications));
       }
@@ -246,45 +278,43 @@ export default class Instance {
             this.pairingRequested = true;
             try {
               const pairingCode = await sock.requestPairingCode(this.phoneNumber);
-              if (this.stopped || generation !== this.generation) return;
+              if (socketClosed || this.stopped || generation !== this.generation) return;
               this.pairingCode = pairingCode;
               await emit('pairingcode.updated', { pairingCode });
             } catch { this.pairingRequested = false; throw new Error('Pairing code request failed'); }
           }
         } else {
           const qrCode = await QRCode.toDataURL(update.qr);
-          if (this.stopped || generation !== this.generation) return;
+          if (socketClosed || this.stopped || generation !== this.generation) return;
           this.qrCode = qrCode;
           await emit('qrcode.updated', { qrCode });
         }
         this.finishInitial();
       }
       if (update.connection === 'connecting') {
-        this.setStatus('OFFLINE'); await emit('connection.connecting', { connection: 'connecting' });
+        await emit('connection.connecting', { connection: 'connecting' });
       } else if (update.connection === 'open') {
         this.reconnectAttempts = 0;
         this.qrCode = undefined; this.pairingCode = undefined;
-        this.setStatus('ONLINE'); this.instance!.instanceJid = sock.user?.id ?? null;
+        this.instance!.instanceJid = sock.user?.id ?? null;
         this.finishInitial();
         await this.auth!.saveCreds();
+        if (socketClosed) return;
         await emit('connection.open', { connection: 'open' });
         await emit('messaging-history.progress', history.snapshot());
         // Photo lookup failure must not suppress the connection event or block startup.
         void this.getProfilePicture().catch(() => undefined);
       } else if (update.connection === 'close') {
-        this.setStatus('OFFLINE');
-        const reason = (update.lastDisconnect?.error as { output?: { statusCode?: number } } | undefined)?.output?.statusCode;
-        const terminal = [DisconnectReason.loggedOut, DisconnectReason.badSession, DisconnectReason.connectionReplaced, DisconnectReason.forbidden, DisconnectReason.multideviceMismatch].includes(reason as DisconnectReason);
-        if (terminal) this.setStatus('REMOVED');
+        const reason = closeReason(update);
+        const terminal = isTerminal(reason);
         await emit('messaging-history.progress', history.snapshot('interrupted'));
-        await emit(terminal ? 'connection.removed' : 'connection.close', { reason: reason ?? null });
         this.generation++;
         this.detachSocket();
         if (terminal) {
           this.stopped = true;
           this.setStatus('REMOVED'); this.finishInitial();
           // Logging out invalidates only auth. Chat history survives until explicit DELETE.
-          if (reason === DisconnectReason.loggedOut || reason === DisconnectReason.badSession) await this.auth!.reset();
+          if (this.revoked) { await this.auth!.reset(); this.revoked = false; }
         } else this.scheduleReconnect();
       }
     });
@@ -308,12 +338,22 @@ export default class Instance {
         await this.dependencies.store.saveManyChats(this.key, chunk as any);
         await emit('chats.set', chunk, metadata('chats.set', index));
       }
-      // Internal protocol messages remain available for Baileys getMessage,
-      // while only displayable messages contribute to the webhook watermark.
+      // Persist each slice before delivering it; the first messages should not
+      // wait for tens of thousands of later messages in the same history event.
+      // Internal protocol messages remain available for getMessage without
+      // contributing to the visible webhook watermark.
+      let savedVisible = 0, deliveredVisible = 0, chunkIndex = 0;
       for (let offset = 0; offset < messages.length; offset += WEBHOOK_CHUNK_ITEMS) {
-        await this.dependencies.store.saveManyMessages(this.key, messages.slice(offset, offset + WEBHOOK_CHUNK_ITEMS));
+        const slice = messages.slice(offset, offset + WEBHOOK_CHUNK_ITEMS);
+        await this.dependencies.store.saveManyMessages(this.key, slice);
+        savedVisible += slice.filter(message => this.isWebhookMessage(message)).length;
+        while (chunkIndex < plans.messages.length && deliveredVisible + plans.messages[chunkIndex]!.length <= savedVisible) {
+          const chunk = plans.messages[chunkIndex]!;
+          await emit('messages.set', chunk, metadata('messages.set', chunkIndex));
+          deliveredVisible += chunk.length;
+          chunkIndex++;
+        }
       }
-      for (const [index, chunk] of plans.messages.entries()) await emit('messages.set', chunk, metadata('messages.set', index));
       await emit('messaging-history.progress', history.importedBatch());
     });
     on('messages.upsert', async ({ messages }) => {
@@ -369,12 +409,14 @@ export default class Instance {
     for (const event of passthrough) on(event, data => emit(event, data));
   }
 
+  private isWebhookMessage(message: WAMessage): boolean {
+    if (!message.message || message.message.senderKeyDistributionMessage) return false;
+    const protocol = message.message.protocolMessage;
+    return !protocol || protocol.type === proto.Message.ProtocolMessage.Type.REVOKE || protocol.type === proto.Message.ProtocolMessage.Type.MESSAGE_EDIT;
+  }
+
   private webhookMessages(messages: WAMessage[]): unknown[] {
-    return messages.filter(message => {
-      if (!message.message || message.message.senderKeyDistributionMessage) return false;
-      const protocol = message.message.protocolMessage;
-      return !protocol || protocol.type === proto.Message.ProtocolMessage.Type.REVOKE || protocol.type === proto.Message.ProtocolMessage.Type.MESSAGE_EDIT;
-    }).map(message => ({
+    return messages.filter(message => this.isWebhookMessage(message)).map(message => ({
       ...serializeBaileys(message), messageTimestamp: messageTimestamp(message.messageTimestamp), messageType: getContentType(message.message!),
     }));
   }
@@ -385,8 +427,10 @@ export default class Instance {
   }
 
   private scheduleReconnect(): void {
-    if (this.stopped || this.retryTimer || this.reconnectAttempts >= 5) { this.finishInitial(); return; }
-    const wait = Math.min(30_000, this.dependencies.reconnectDelayMs * 2 ** this.reconnectAttempts++);
+    if (this.stopped || this.retryTimer) { this.finishInitial(); return; }
+    // A temporary network outage can last hours. Keep retrying registered
+    // sessions with capped backoff; terminal logout reasons never reach here.
+    const wait = Math.min(this.dependencies.reconnectMaxDelayMs, this.dependencies.reconnectDelayMs * 2 ** Math.min(this.reconnectAttempts++, 16));
     this.retryTimer = setTimeout(() => {
       this.retryTimer = undefined;
       if (this.stopped) return;
@@ -399,7 +443,7 @@ export default class Instance {
   }
 
   setStatus(status: ConnectionStatus): void {
-    if (this.instance) this.instance.connectionStatus = status;
+    if (this.instance) updateConnectionStatus(this.instance, status);
     if (this.key) instanceStatus.set(this.key, status);
   }
 
@@ -436,6 +480,7 @@ export default class Instance {
       await Promise.all([...this.eventTasks]);
       await Promise.allSettled([...this.socketOperations]);
       await this.auth?.drain();
+      if (this.revoked) { await this.auth?.reset(); this.revoked = false; }
       if (this.instance?.connectionStatus !== 'REMOVED') this.setStatus('OFFLINE');
       if (activeHistory && this.instance) {
         await this.dependencies.emit('messaging-history.progress', { ...this.instance }, activeHistory.snapshot('interrupted'));

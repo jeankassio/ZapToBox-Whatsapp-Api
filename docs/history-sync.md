@@ -48,6 +48,8 @@ Os campos de `provider` podem ser `null` quando não conhecidos. O percentual po
 
 Antes de persistir ou emitir qualquer `.set`, a API planeja os arrays, soma exatamente seus chunks em `expectedChunks` e emite `receiving`. Em seguida emite `importing`, persiste e envia os lotes, e publica o estado resultante. Cada array tem até 100 entradas e 900.000 bytes, reservando margem para o envelope HTTP. Uma entrada individual grande demais provoca erro explícito e não produz um falso lote concluído.
 
+As mensagens novas são inseridas em grupos de até 100, com uma consulta de existência e uma inserção por grupo. Repetições idênticas não provocam novas gravações; edições e atualizações parciais mantêm a mesclagem, a data original e os identificadores alternativos. Grupos com IDs repetidos ou uma primeira ocorrência já editada seguem o caminho sequencial para preservar a ordem de inserção usada no desempate de horários. Cada `messages.set` é enfileirado assim que sua fatia foi persistida, sem esperar o restante de um histórico grande. `processedBatches` continua contando apenas lotes inteiramente persistidos e enfileirados.
+
 `contacts.set`, `chats.set` e `messages.set` preservam `data` como array e recebem este campo adicional no envelope:
 
 ```json
@@ -76,6 +78,18 @@ O backend pode exibir “Histórico recebido sincronizado” quando seus chunks 
 A API observa notificações reais pelo hook `shouldSyncHistoryMessage`, ignorando sondagens que têm apenas `syncType`. O [buffer oficial](https://github.com/WhiskeySockets/Baileys/blob/v7.0.0-rc14/src/Utils/event-buffer.ts) pode reunir vários históricos, deduplicar entradas e manter apenas o marcador final. O tracker correlaciona esse marcador com um prefixo de notificações anteriores; notificações sem correspondência mantêm `receiving`. Essa correlação é uma inferência sobre lotes observáveis, não uma prova de que todo download interno teve sucesso ou de que acabaram todas as etapas. Falhas internas sem callback de erro identificável permanecem uma limitação do provedor.
 
 Falhas de persistência, serialização e enqueue que esta API consegue observar geram erro redigido e param o socket. O encerramento normal drena os trabalhos aceitos e emite `interrupted`. Credenciais e dados privados não fazem parte do progresso.
+
+## Reconexão e estado atual
+
+Quedas transitórias retomam a sessão automaticamente com espera de 1, 2, 4, 8, 16 e, depois, 30 segundos entre tentativas. Não existe mais o encerramento das tentativas após a quinta falha. Logout, sessão inválida, substituição do dispositivo e demais motivos terminais continuam interrompendo a reconexão. Falhas de persistência ou da fila também continuam exigindo correção antes da retomada para evitar perda silenciosa de eventos.
+
+O evento `connection.update` com `close` atualiza imediatamente o estado em memória e encerra o socket, mesmo enquanto um lote aceito termina sua gravação. Logout pelo celular passa diretamente para `REMOVED`; eventos `open` ou QR atrasados daquele socket não podem reativá-lo. O webhook `connection.close`/`connection.removed` é persistido diretamente no recebimento, fora da fila de importação. Gravações de histórico já aceitas continuam preservadas.
+
+Eventos `connection.*` usam a subfila durável `WEBHOOK_QUEUE_DIR/lifecycle`, com processamento independente: histórico em andamento ou aguardando retry não impede a notificação de desconexão. Cada fila mantém a ordem por instância, identificadores estáveis, retries e dead-letter; estatísticas e replay incluem ambas. O receptor não deve pressupor ordem entre eventos de conexão e mensagens/contatos. Eventos antigos já gravados na raiz continuam disponíveis para entrega.
+
+Os endpoints de estado, listagem e conexão conferem se o WebSocket está aberto antes de responder `ONLINE`. As instâncias expõem `connectionUpdatedAt`, horário da observação da mudança de estado, e `GET /instances/status/:owner/:instanceName` também retorna `observedAt`, horário da consulta, inclusive quando `exists: false`. Esses horários são ordenados dentro do processo e não devem substituir o controle de concorrência do receptor ou pressupor relógios sincronizados entre servidores. Um receptor deve confirmar o estado atual por esse endpoint quando processa um evento de conexão; não deve usar o `instance.connectionStatus` de uma mensagem ou contato antigo como prova de conexão atual.
+
+O socket já envia verificações periódicas de conectividade. A presença pública permanece indisponível ao conectar (`markOnlineOnConnect: false`); essa configuração não desliga o transporte. O horário de atividade exibido pelo celular, isoladamente, não permite confirmar a causa de uma queda. A confirmação depende do estado atual e dos eventos de conexão da API.
 
 ## Validação
 

@@ -9,6 +9,7 @@ import { createPersistentAuth, type AuthRepository, type AuthEntry } from '../sr
 import { instances, instanceConnection, instanceStatus } from '../src/shared/constants.js';
 import { deserializeBaileys } from '../src/infra/mappers/messageMapper.js';
 import type { HistoryChunkMetadata } from '../src/shared/types.js';
+import { publicInstanceInfo } from '../src/shared/instance-info.js';
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
@@ -106,6 +107,80 @@ test('duplicate close notifications create one replacement; shutdown cancels pen
   await f.instance.shutdown();
   await sleep(20);
   assert.equal(f.sockets.length, 2);
+});
+
+test('temporary outages keep reconnecting past five attempts and terminal logout cancels retries', async t => {
+  const f = await fixture(t, { overrides: { reconnectDelayMs: 1, reconnectMaxDelayMs: 1 } });
+  await f.start();
+  for (let attempt = 0; attempt < 7; attempt++) {
+    f.sockets.at(-1).ev.emit('connection.update', { connection: 'close', lastDisconnect: { error: { output: { statusCode: DisconnectReason.connectionLost } } } });
+    await f.flush();
+    await sleep(10);
+    assert.equal(f.sockets.length, attempt + 2, `retry ${attempt + 1} must create one replacement`);
+  }
+  f.sockets.at(-1).ev.emit('connection.update', { connection: 'open' }); await f.flush();
+  assert.equal(instanceStatus.get(f.key), 'ONLINE');
+  f.sockets.at(-1).ev.emit('connection.update', { connection: 'close', lastDisconnect: { error: { output: { statusCode: DisconnectReason.loggedOut } } } });
+  await f.flush(); await sleep(10);
+  assert.equal(f.sockets.length, 8);
+  assert.equal(instanceStatus.get(f.key), 'REMOVED');
+  assert.equal(f.auth.state.creds.registered, false);
+});
+
+test('persisted history slices are delivered early and transport closure is visible during a slow import', async t => {
+  const f = await fixture(t); await f.start();
+  f.sockets[0].ev.emit('connection.update', { connection: 'open' }); await f.flush();
+  const release = deferred(), entered = deferred();
+  const save = f.store.saveManyMessages;
+  let slices = 0;
+  f.store.saveManyMessages = async (key, messages) => {
+    if (++slices === 2) { entered.resolve(); await release.promise; }
+    await save(key, messages);
+  };
+  const messages: WAMessage[] = Array.from({ length: 251 }, (_, id) => ({ key: { id: `slow-${id}`, remoteJid: '2@lid' }, message: { conversation: String(id) } }));
+  f.sockets[0].ev.emit('messaging-history.set', { messages, chats: [], contacts: [], syncType: 3, progress: 100 });
+  await entered.promise;
+  assert.equal(f.stored.size, 100);
+  assert.equal(f.webhooks.filter(item => item.event === 'messages.set').length, 1);
+  assert.equal(f.webhooks.find(item => item.event === 'messages.set')!.data.length, 100);
+  f.sockets[0].ev.emit('connection.update', { connection: 'close' });
+  assert.equal(instanceStatus.get(f.key), 'OFFLINE', 'status must not wait for the slow history write');
+  assert.equal(f.webhooks.some(item => item.event === 'connection.close'), true, 'connection closure bypasses the slow history write');
+  release.resolve(); await f.flush();
+  assert.equal(f.stored.size, 251);
+  assert.deepEqual(f.webhooks.filter(item => item.event === 'messages.set').map(item => item.data.length), [100, 100, 51]);
+  assert.equal(f.webhooks.filter(item => item.event === 'connection.close').length, 1);
+});
+
+test('phone logout is immediately terminal and a queued open cannot revive it behind a slow import', async t => {
+  const f = await fixture(t); await f.start();
+  const release = deferred(), entered = deferred();
+  t.after(() => release.resolve());
+  const save = f.store.saveManyMessages;
+  f.store.saveManyMessages = async (key, messages) => { entered.resolve(); await release.promise; await save(key, messages); };
+  const socket = f.sockets[0];
+  socket.ev.emit('messaging-history.set', { messages: [{ key: { id: 'before-logout', remoteJid: '2@lid' }, message: { conversation: 'Keep this history' } }], chats: [], contacts: [], syncType: 3, progress: 100 });
+  await entered.promise;
+  socket.ev.emit('connection.update', { connection: 'open' });
+  const online = publicInstanceInfo(instanceConnection[f.key]!);
+  assert.equal(online.connectionStatus, 'ONLINE');
+  socket.ev.emit('connection.update', { connection: 'close', lastDisconnect: { error: { output: { statusCode: DisconnectReason.loggedOut } } } });
+  const removed = publicInstanceInfo(instanceConnection[f.key]!);
+  assert.equal(removed.connectionStatus, 'REMOVED', 'phone logout must be visible before any pending storage operation finishes');
+  assert.equal(instanceStatus.get(f.key), 'REMOVED');
+  assert.equal(f.webhooks.filter(item => item.event === 'connection.removed').length, 1, 'the phone logout notification does not wait for the slow import');
+  assert.equal(f.instance.getSock(), undefined, 'network operations stop immediately');
+  assert.ok(Date.parse(removed.connectionUpdatedAt!) > Date.parse(online.connectionUpdatedAt!));
+  socket.ev.emit('connection.update', { connection: 'open' });
+  assert.equal(instanceStatus.get(f.key), 'REMOVED', 'late events from the closed socket are ignored');
+  release.resolve(); await f.flush();
+  assert.equal(f.stored.size, 1, 'accepted history survives phone logout');
+  assert.equal(f.webhooks.some(item => item.event === 'connection.open'), false);
+  assert.equal(f.webhooks.filter(item => item.event === 'connection.removed').length, 1);
+  assert.equal(f.auth.state.creds.registered, false);
+  assert.equal(publicInstanceInfo(instanceConnection[f.key]!).connectionUpdatedAt, removed.connectionUpdatedAt, 'the event queue cannot move the lifecycle timestamp to its delayed delivery time');
+  assert.equal(instanceStatus.get(f.key), 'REMOVED');
+  assert.equal(f.deleted(), 0);
 });
 
 test('shutdown waits for pending auth initialization and never opens its socket afterward', async t => {
@@ -384,7 +459,7 @@ test('socket replacement interrupts the old run and rejects late history callbac
   old.ev.emit('connection.update', { connection: 'open' }); await f.flush();
   const oldRun = f.webhooks.at(-1)!.data.runId;
   old.ev.emit('connection.update', { connection: 'close' }); await f.flush();
-  assert.equal(f.webhooks.at(-2)!.data.phase, 'interrupted');
+  assert.equal(f.webhooks.at(-1)!.data.phase, 'interrupted');
   await sleep(20);
   const count = f.webhooks.length;
   old.config.shouldSyncHistoryMessage({ syncType: 3, directPath: '/late' });

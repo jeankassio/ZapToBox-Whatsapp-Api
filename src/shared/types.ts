@@ -8,6 +8,8 @@ export interface InstanceInfo {
   instanceName: string;
   owner: string;
   connectionStatus: ConnectionStatus;
+  /** Time the current transport state was observed, independent of webhook delivery delays. */
+  connectionUpdatedAt?: string;
   profilePictureUrl?: string | undefined;
   instanceJid?: string | null;
 }

@@ -3,6 +3,7 @@ import InstancesController from "../controllers/instances.js";
 import { requireScope } from "../../state/auth.js";
 import { validateIdentity } from "../../../shared/identity.js";
 import { RequestError } from "../controllers/base.js";
+import { connectionTimestamp } from '../../../shared/instance-info.js';
 import { historyRescan } from '../../history-rescan/index.js';
 import type { HistoryRescanService } from '../../history-rescan/service.js';
 
@@ -40,7 +41,7 @@ export default class InstanceRoutes {
       const owner=identity(req.params.owner,'owner'),name=identity(req.params.instanceName,'instanceName');
       allowed(req,owner,name);
       const data=await controller.find(owner,name);
-      return {success:true,exists:data!==null,data};
+      return {success:true,exists:data!==null,data,observedAt:connectionTimestamp()};
     }));
     router.get('/get',handle(async req=>{
       const owner=req.query.owner!==undefined?identity(req.query.owner,'owner'):req.auth?.owner;

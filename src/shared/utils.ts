@@ -46,6 +46,7 @@ export async function genProxy(proxy?:string): Promise<ProxyAgent> {
 export async function trySendWebhook(event:string,instance:InstanceData,data:unknown,history?:HistoryChunkMetadata): Promise<void> {
   const info = {
     owner:instance.owner,instanceName:instance.instanceName,connectionStatus:instance.connectionStatus,
+    ...(instance.connectionUpdatedAt ? {connectionUpdatedAt:instance.connectionUpdatedAt} : {}),
     profilePictureUrl:instance.profilePictureUrl,
     instanceJid:jidNormalizedUser(instance.socket?.user?.id ?? instance.instanceJid ?? '') || null,
   };

@@ -40,7 +40,7 @@ const storageErrorCodes = new Set([
   "EMFILE", "ENFILE", "ENOENT", "EEXIST", "EBUSY", "ETXTBSY", "ENAMETOOLONG",
 ]);
 
-/** One process owns this directory; retries keep ordering within each instance. */
+/** One process owns this directory; each lane keeps retries ordered within an instance. */
 export class WebhookOutbox {
   private flight: Promise<void> | undefined;
   private pending = false;
@@ -49,10 +49,14 @@ export class WebhookOutbox {
   private timer: NodeJS.Timeout | undefined;
   private readonly directory: string;
   private readonly now: () => number;
+  private readonly lifecycle: WebhookOutbox | undefined;
   private lastDiagnostic: { code: string; loggedAt: number } | undefined;
-  constructor(private readonly options: OutboxOptions) {
+  constructor(private readonly options: OutboxOptions, lifecycleLane = false) {
     this.directory = path.resolve(options.directory);
     this.now = options.now ?? Date.now;
+    // Connection events must reach the receiver even while a message/history
+    // request is slow or retrying. They retain their own durable ordered lane.
+    if (!lifecycleLane) this.lifecycle = new WebhookOutbox({ ...options, directory: path.join(this.directory, 'lifecycle') }, true);
   }
   private reportQueueError(error: unknown, phase: OutboxDiagnostic["phase"]): void {
     const value = error && typeof error === "object" && "code" in error ? error.code : undefined;
@@ -78,6 +82,7 @@ export class WebhookOutbox {
     console.error("Webhook queue storage processing failed; persisted events remain available", diagnostic);
   }
   async enqueue(event: string, instance: InstanceInfo, data: unknown, history?: HistoryChunkMetadata, identity?: { id: string; timestamp: string }): Promise<string | undefined> {
+    if (this.lifecycle && event.startsWith('connection.')) return this.lifecycle.enqueue(event, instance, data, history, identity);
     if (!this.options.url) return undefined;
     if (identity && (!/^[a-f0-9-]{32,64}$/.test(identity.id) || !Number.isFinite(Date.parse(identity.timestamp)))) throw new Error('Invalid durable event identity');
     const payload = jsonValue<WebhookEvent>({ id: identity?.id ?? randomUUID(), timestamp: identity?.timestamp ?? new Date(this.now()).toISOString(), event, instance, data, ...(history ? { history } : {}) });
@@ -131,9 +136,15 @@ export class WebhookOutbox {
   }
   async flush(): Promise<void> {
     if (!this.options.url || !this.options.durable) return;
-    if (this.flight) return this.flight;
-    this.flight = this.process();
-    try { await this.flight; } finally { this.flight = undefined; }
+    const lifecycle = this.lifecycle?.flush();
+    if (!this.flight) {
+      const flight = this.process();
+      this.flight = flight;
+      // A failure in the independent lifecycle directory must not release this
+      // lane's lock while its HTTP request is still running.
+      void flight.finally(() => { if (this.flight === flight) this.flight = undefined; }).catch(() => {});
+    }
+    await Promise.all([this.flight, lifecycle]);
   }
   private async process(): Promise<void> {
     do {
@@ -175,6 +186,7 @@ export class WebhookOutbox {
   start(): void {
     if (this.timer) return;
     this.stopped = false;
+    this.lifecycle?.start();
     this.timer = setInterval(()=>{void this.flush().catch(error=>this.reportQueueError(error,"retry"));},this.options.retryMs);
     this.timer.unref();
     void this.flush().catch(error=>this.reportQueueError(error,"startup"));
@@ -183,20 +195,21 @@ export class WebhookOutbox {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
-    await this.flight;
+    await Promise.allSettled([this.flight, this.lifecycle?.stop()]);
   }
   async stats(): Promise<{pending:number; deadLetter:number}> {
     const count = async(dir:string) => {
       try { return (await fs.readdir(dir,{withFileTypes:true})).filter(item=>item.isFile() && (item.name.endsWith(".json") || item.name.endsWith(".invalid"))).length; }
       catch(error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0; throw error; }
     };
-    return {pending:await count(this.directory),deadLetter:await count(path.join(this.directory,"dead-letter"))};
+    const lifecycle = await this.lifecycle?.stats();
+    return {pending:await count(this.directory) + (lifecycle?.pending ?? 0),deadLetter:await count(path.join(this.directory,"dead-letter")) + (lifecycle?.deadLetter ?? 0)};
   }
   async replayDeadLetters(): Promise<number> {
     const dead = path.join(this.directory,"dead-letter");
     let files: string[];
-    try { files = await fs.readdir(dead); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0; throw error; }
-    let count = 0;
+    try { files = await fs.readdir(dead); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; files = []; }
+    let count = await this.lifecycle?.replayDeadLetters() ?? 0;
     for (const file of files.filter(item=>item.endsWith(".json"))) {
       const record = await this.read(path.join(dead,file));
       if (!record) continue;

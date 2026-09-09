@@ -25,11 +25,11 @@ test("offline events retry in order with stable identity and protobuf bytes",asy
   try {
     const id=await state.queue.enqueue("messages.upsert",instance,{timestamp:9_000_000_000_000_001n,bytes:Buffer.from([1,2,3])});
     await state.queue.flush();
-    await state.queue.enqueue("connection.close",instance,{connection:"close"});await state.queue.flush();
+    await state.queue.enqueue("messages.update",instance,{status:2});await state.queue.flush();
     assert.equal(seen.length,1,"new event must not overtake a failed event");
     assert.equal((await state.queue.stats()).pending,2);
     fail=false;time+=20;await state.queue.flush();
-    assert.deepEqual(seen.map(item=>item.body.event),["messages.upsert","messages.upsert","connection.close"]);
+    assert.deepEqual(seen.map(item=>item.body.event),["messages.upsert","messages.upsert","messages.update"]);
     assert.equal(seen[1]!.body.id,id);
     assert.equal(seen[1]!.body.data.timestamp,"9000000000000001");
     assert.equal(seen[1]!.body.data.bytes.type,"Buffer");
@@ -38,6 +38,75 @@ test("offline events retry in order with stable identity and protobuf bytes",asy
     assert.equal(seen[1]!.headers.get("X-Webhook-Id"),id);
     assert.equal((await state.queue.stats()).pending,0);
   } finally {await state.cleanup();}
+});
+
+test('phone logout has a durable delivery lane independent of a blocked history request', async () => {
+  let release!: () => void, entered!: () => void, delivered!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const busy = new Promise<void>(resolve => { entered = resolve; });
+  const notification = new Promise<void>(resolve => { delivered = resolve; });
+  const events: string[] = [];
+  const state = await setup({ concurrency: 1, fetch: async (_url, init) => {
+    const body = JSON.parse(String(init?.body)); events.push(body.event);
+    if (body.event === 'messages.set') { entered(); await gate; }
+    if (body.event === 'connection.removed') delivered();
+    return new Response(null, { status: 204 });
+  } });
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await state.queue.enqueue('messages.set', instance, [{ key: { id: 'history' } }]);
+    await busy;
+    await state.queue.enqueue('messages.update', instance, [{ status: 2 }]);
+    await state.queue.enqueue('connection.removed', { ...instance, connectionStatus: 'REMOVED' }, { reason: 401 });
+    await Promise.race([notification, new Promise<never>((_resolve, reject) => { timeout = setTimeout(() => reject(new Error('Logout remained blocked behind history')), 2000); })]);
+    assert.deepEqual(events, ['messages.set', 'connection.removed']);
+    release(); await state.queue.flush();
+    assert.deepEqual(events, ['messages.set', 'connection.removed', 'messages.update']);
+    assert.deepEqual(await state.queue.stats(), { pending: 0, deadLetter: 0 });
+  } finally { if (timeout) clearTimeout(timeout); release(); await state.cleanup(); }
+});
+
+test('lifecycle retries retain identity and order across restart without blocking message delivery', async () => {
+  let time = 1000, fail = true;
+  const received: any[] = [];
+  const state = await setup({ now: () => time, fetch: async (_url, init) => {
+    const body = JSON.parse(String(init?.body)); received.push(body);
+    return new Response(null, { status: fail && body.event.startsWith('connection.') ? 503 : 204 });
+  } });
+  let replacement: WebhookOutbox | undefined;
+  try {
+    const id = await state.queue.enqueue('connection.close', instance, {}); await state.queue.flush();
+    await state.queue.enqueue('connection.removed', { ...instance, connectionStatus: 'REMOVED' }, {}); await state.queue.flush();
+    await state.queue.enqueue('messages.set', instance, []); await state.queue.flush();
+    assert.deepEqual(received.map(item => item.event), ['connection.close', 'messages.set']);
+    assert.equal((await state.queue.stats()).pending, 2);
+    await state.queue.stop();
+    fail = false; time += 20;
+    replacement = new WebhookOutbox(state.options);
+    await replacement.flush();
+    assert.deepEqual(received.map(item => item.event), ['connection.close', 'messages.set', 'connection.close', 'connection.removed']);
+    assert.equal(received[2].id, id);
+    assert.deepEqual(await replacement.stats(), { pending: 0, deadLetter: 0 });
+  } finally { await replacement?.stop(); await state.cleanup(); }
+});
+
+test('a lifecycle storage failure cannot start a second delivery of an in-flight history item', async () => {
+  let release!: () => void, entered!: () => void, calls = 0;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const busy = new Promise<void>(resolve => { entered = resolve; });
+  const state = await setup({ logError: () => {}, fetch: async () => { calls++; entered(); await gate; return new Response(null, { status: 204 }); } });
+  const blocker = path.join(state.options.directory, 'lifecycle');
+  try {
+    await fs.writeFile(blocker, 'not a queue directory');
+    await state.queue.enqueue('messages.set', instance, []);
+    await busy;
+    await assert.rejects(state.queue.flush(), error => ['ENOTDIR', 'EEXIST'].includes((error as NodeJS.ErrnoException).code ?? ''));
+    assert.equal(calls, 1, 'failure of another lane must not release this lane lock');
+    await fs.unlink(blocker);
+    release(); await state.queue.flush();
+    assert.equal(calls, 1);
+    assert.deepEqual(await state.queue.stats(), { pending: 0, deadLetter: 0 });
+  } finally { release(); await state.cleanup(); }
 });
 
 test("poison files are isolated and exhausted events remain replayable",async()=>{
@@ -164,7 +233,7 @@ test("startup and periodic storage failures identify the process and queue direc
     for (const diagnostic of diagnostics) {
       assert.equal(diagnostic.component, "webhook-outbox");
       assert.equal(diagnostic.code, "ENOTDIR");
-      assert.equal(diagnostic.directory, queueDirectory);
+      assert.ok([queueDirectory, path.join(queueDirectory, 'lifecycle')].includes(diagnostic.directory));
       assert.equal(diagnostic.pid, process.pid);
       assert.match(diagnostic.advice, /must be directories, not files/);
       assert.equal("stack" in diagnostic, false);

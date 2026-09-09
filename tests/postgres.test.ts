@@ -22,11 +22,32 @@ test("PostgreSQL: tenant isolation, protobuf roundtrip, contact merge, Signal pe
     const restored=await Repository.getMessageById("SAME-ID",a,"555000@lid");
     assert.deepEqual(Buffer.from(restored!.message!.imageMessage!.mediaKey!),Buffer.from([1,2,3]));
     assert.equal(restored?.key.remoteJidAlt,"555000@lid");
+    const bulk = Array.from({length:251},(_,index)=>({...msg,key:{...msg.key,id:`BULK-${index}`},messageTimestamp:1700000000+index}));
+    await Repository.saveManyMessages(a,bulk);
+    const beforeReplay = await prisma.message.findMany({where:{instance:a,messageId:{startsWith:'BULK-'}},orderBy:{id:'asc'}});
+    assert.equal(beforeReplay.length,251);
+    await Repository.saveManyMessages(a,bulk);
+    assert.deepEqual(await prisma.message.findMany({where:{instance:a,messageId:{startsWith:'BULK-'}},orderBy:{id:'asc'}}),beforeReplay);
+    await Repository.saveManyMessages(a,[
+      {...bulk[0]!,message:{editedMessage:{message:{conversation:'Bulk edit'}}},messageTimestamp:1700000400},
+      {key:bulk[0]!.key,status:4},
+    ]);
+    const bulkEdited=await Repository.getMessageById('BULK-0',a);
+    assert.equal(bulkEdited?.messageTimestamp,1700000000);
+    assert.equal(bulkEdited?.message?.editedMessage?.message?.conversation,'Bulk edit');
+    assert.equal(bulkEdited?.status,4);
+    const tieKey={id:'TIE-A',remoteJid:'tie@lid'};
+    await Repository.saveManyMessages(a,[
+      {key:tieKey,message:{conversation:'First'},messageTimestamp:1700000500},
+      {key:{...tieKey,id:'TIE-B'},message:{conversation:'Second'},messageTimestamp:1700000500},
+      {key:tieKey,status:4},
+    ]);
+    assert.equal((await Repository.getLastMessageByInstance(a,'tie@lid'))?.key.id,'TIE-B');
     await Repository.saveMessages(a,{key:msg.key,status:0});
     assert.equal((await Repository.getMessageById("SAME-ID",a))?.status,0);
     assert.equal((await Repository.getMessageById("SAME-ID",a))?.message?.imageMessage?.caption,"A");
     assert.deepEqual(Buffer.from((await Repository.getMessageById("SAME-ID",a))!.message!.imageMessage!.mediaKey!),Buffer.from([1,2,3]));
-    assert.equal((await Repository.getLastMessageByInstance(a,"555000@lid"))?.key.id,"SAME-ID");
+    assert.equal((await Repository.getLastMessageByInstance(a,"555000@lid"))?.key.id,"BULK-250");
     await Repository.saveContact(a,{id:"555000@lid",name:"Pessoa"});
     await Repository.saveContact(a,{id:"123456789@s.whatsapp.net"});
     await Repository.saveContact(a,{id:"555000@lid",phoneNumber:"123456789@s.whatsapp.net"});

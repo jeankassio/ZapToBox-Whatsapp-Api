@@ -1,4 +1,5 @@
-import { Prisma, PrismaClient } from "@prisma/client";
+import { Prisma, PrismaClient, type Message } from "@prisma/client";
+import { isDeepStrictEqual } from 'node:util';
 import type { WAMessage, WAMessageKey } from "@whiskeysockets/baileys";
 import type { Contact } from "../../shared/types.js";
 import { MessageMapper, editTimestampMs, isEditedMessage, sourceEdit } from "../../infra/mappers/messageMapper.js";
@@ -46,8 +47,11 @@ export default class PrismaConnection {
   }
   static async saveMessages(instance: string, msg: WAMessage): Promise<unknown> {
     if (!instance || !msg.key?.id || !msg.key.remoteJid) return;
-    return serialized(instance, async () => {
-      const previous = await prisma.message.findUnique({where:{instance_messageId:{instance,messageId:msg.key.id!}}});
+    return serialized(instance, () => this.saveMessageRow(instance, msg));
+  }
+  /** Caller owns the per-instance write lock. */
+  private static async saveMessageRow(instance: string, msg: WAMessage, known?: Message | null): Promise<unknown> {
+      const previous = known === undefined ? await prisma.message.findUnique({where:{instance_messageId:{instance,messageId:msg.key.id!}}}) : known;
       const old = previous?.content as Record<string, unknown> | undefined;
       const mergedKey={...(old?.key as object),...msg.key};
       if(previous && previous.remoteJid!==msg.key.remoteJid && !mergedKey.remoteJidAlt) mergedKey.remoteJidAlt=previous.remoteJid;
@@ -67,16 +71,46 @@ export default class PrismaConnection {
         ...(currentSourceEdit ? { sourceEdit: currentSourceEdit } : {}),
         ...(originalTimestamp !== null ? { messageTimestamp: originalTimestamp } : {})});
       const status = msg.status != null ? String(msg.status) : previous?.status ?? null;
+      if (previous && previous.remoteJid === msg.key.remoteJid && previous.status === status && previous.messageTimestamp === timestamp
+        && (msg.pushName == null || previous.pushName === msg.pushName) && isDeepStrictEqual(previous.content, content)) return previous;
       return prisma.message.upsert({
         where:{instance_messageId:{instance,messageId:msg.key.id!}},
         update:{content,remoteJid:msg.key.remoteJid!, status, messageTimestamp:timestamp, ...(msg.pushName != null ? {pushName:msg.pushName}: {})},
         create:{instance,messageId:msg.key.id!,remoteJid:msg.key.remoteJid!,senderLid:msg.key.participantAlt ?? msg.key.remoteJidAlt ?? null,
           fromMe:!!msg.key.fromMe,pushName:msg.pushName ?? null,content,status,messageTimestamp:timestamp}
       });
-    });
   }
   static async saveManyMessages(instance: string, msgs: WAMessage[]): Promise<void> {
-    for (const msg of msgs) await this.saveMessages(instance,msg);
+    if (!instance) return;
+    // Initial history is predominantly new rows. One lookup and one INSERT per
+    // bounded slice replace two DB round trips for every message. Existing rows
+    // still use the exact merge path for edits, partial updates and PN/LID keys.
+    for (let offset = 0; offset < msgs.length; offset += 100) {
+      const batch = msgs.slice(offset, offset + 100).filter(msg => msg.key?.id && msg.key.remoteJid);
+      if (!batch.length) continue;
+      await serialized(instance, async () => {
+        const ids = batch.map(msg => msg.key.id!);
+        const existing = await prisma.message.findMany({ where: { instance, messageId: { in: ids } } });
+        const known = new Map(existing.map(row => [row.messageId, row]));
+        const duplicates = new Set(ids.filter((id, index) => ids.indexOf(id) !== index));
+        // Mixed duplicate/new-edit slices must retain their original insert
+        // order: physical IDs break ties between messages with equal timestamps.
+        if (duplicates.size || batch.some(msg => !known.has(msg.key.id!) && isEditedMessage(msg.message))) {
+          for (const msg of batch) await this.saveMessageRow(instance, msg);
+          return;
+        }
+        const inserts = batch.filter(msg => !known.has(msg.key.id!));
+        const insertIds = new Set(inserts.map(msg => msg.key.id!));
+        if (inserts.length) await prisma.message.createMany({ data: inserts.map(msg => ({
+          instance, messageId: msg.key.id!, remoteJid: msg.key.remoteJid!, senderLid: msg.key.participantAlt ?? msg.key.remoteJidAlt ?? null,
+          fromMe: !!msg.key.fromMe, pushName: msg.pushName ?? null, content: jsonValue<Prisma.InputJsonObject>(msg),
+          status: msg.status != null ? String(msg.status) : null, messageTimestamp: msg.messageTimestamp != null ? timestampBigInt(msg.messageTimestamp) : 0n,
+        })) });
+        for (const msg of batch) if (!insertIds.has(msg.key.id!)) {
+          await this.saveMessageRow(instance, msg, known.get(msg.key.id!) ?? null);
+        }
+      });
+    }
   }
   static async saveContact(instance: string, contact: Contact & {phoneNumber?:string;notify?:string}): Promise<unknown> {
     const id = contact.id;
