@@ -11,6 +11,7 @@ import InstanceRoutes from '../src/infra/http/routes/instances.js';
 import Token from '../src/infra/state/auth.js';
 import { RequestError } from '../src/infra/http/controllers/base.js';
 import { WEBHOOK_CHUNK_BYTES } from '../src/infra/webhook/chunks.js';
+import { enqueueRescanEvent } from '../src/infra/history-rescan/delivery.js';
 
 type Internal = RescanJob & { active: boolean; token: string | null; until: number; nextAt: number };
 class MemoryStore implements RescanStore {
@@ -18,20 +19,31 @@ class MemoryStore implements RescanStore {
   source = new Map<string, Array<{ id: number; data: any }>>();
   pages: any[] = [];
   failAdvance = false;
+  async findByKey(instance: string, key: string) {
+    const row = [...this.records.values()].find(job => job.instance === instance && job.idempotencyKey === key);
+    return row ? structuredClone(row) : null;
+  }
+  async findActive(instance: string) {
+    const row = [...this.records.values()].find(job => job.instance === instance && job.active);
+    return row ? structuredClone(row) : null;
+  }
+  async findLatestCompleted(instance: string) {
+    const row = [...this.records.values()].filter(job => job.instance === instance && job.status === 'completed').sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
+    return row ? structuredClone(row) : null;
+  }
   add(instance: string, kind: RescanKind, rows: Array<{ id: number; data: any }>) { this.source.set(`${instance}:${kind}`, structuredClone(rows)); }
-  async begin(instance: string, key: string, known: boolean, now: Date) {
-    const prior = [...this.records.values()].find(job => job.instance === instance && job.idempotencyKey === key); if (prior) return structuredClone(prior);
-    if ([...this.records.values()].some(job => job.instance === instance && job.active)) throw new RequestError(409, 'A history rescan is already in progress for this instance.');
+  async begin(instance: string, key: string, known: boolean, now: Date, connectionUpdatedAt?: string) {
+    const prior = [...this.records.values()].find(job => job.instance === instance && job.idempotencyKey === key || job.instance === instance && job.active); if (prior) return { ...structuredClone(prior), reused: true };
     const max = zeroCounts(), available = zeroCounts();
     for (const kind of RESCAN_KINDS) { const rows = this.source.get(`${instance}:${kind}`) ?? []; max[kind] = rows.at(-1)?.id ?? 0; available[kind] = rows.length; }
     if (!known && !Object.values(available).some(Boolean)) throw new RequestError(404, 'Instance history not found.');
     const job: Internal = { id: randomUUID(), instance, idempotencyKey: key, runId: randomUUID(), status: 'queued',
-      state: { phase: 'contacts', cursor: zeroCounts(), max, available, scanned: zeroCounts(), counts: zeroCounts(), chunks: 0, sequence: 0 },
+      state: { phase: 'contacts', cursor: zeroCounts(), max, available, scanned: zeroCounts(), counts: zeroCounts(), chunks: 0, sequence: 0, ...(connectionUpdatedAt ? { connectionUpdatedAt } : {}) },
       pending: null, attempts: 0, errorCode: null, createdAt: now, updatedAt: now, completedAt: null, active: true, token: null, until: 0, nextAt: now.getTime() };
     this.records.set(job.id, job); return structuredClone(job);
   }
   async get(instance: string, id: string) { const row = this.records.get(id); return row?.instance === instance ? structuredClone(row) : null; }
-  async next(now: Date) { return [...this.records.values()].find(job => job.active && job.nextAt <= now.getTime() && (job.status === 'queued' || job.status === 'running' && job.until <= now.getTime()))?.id ?? null; }
+  async next(now: Date) { return [...this.records.values()].filter(job => job.active && job.nextAt <= now.getTime() && (job.status === 'queued' || job.status === 'running' && job.until <= now.getTime())).sort((a, b) => a.nextAt - b.nextAt || a.createdAt.getTime() - b.createdAt.getTime())[0]?.id ?? null; }
   async claim(id: string, token: string, until: Date, now: Date) {
     const row = this.records.get(id)!; if (!row.active || row.nextAt > now.getTime() || row.status === 'running' && row.until > now.getTime()) return null;
     Object.assign(row, { status: 'running', token, until: until.getTime() }); return structuredClone(row);
@@ -45,7 +57,7 @@ class MemoryStore implements RescanStore {
     row.state = structuredClone(pending.after); row.pending = null; row.updatedAt = now;
     if (pending.complete) Object.assign(row, { active: false, status: 'completed', completedAt: now, token: null }); return true;
   }
-  async release(id: string, token: string) { const row = this.owned(id, token); if (row) Object.assign(row, { status: 'queued', token: null }); }
+  async release(id: string, token: string, now: Date) { const row = this.owned(id, token); if (row) Object.assign(row, { status: 'queued', token: null, nextAt: now.getTime(), nextAttemptAt: now }); }
   async fail(id: string, token: string, code: string, retryAt: Date, terminal: boolean) {
     const row = this.owned(id, token); if (row) Object.assign(row, { status: terminal ? 'failed' : 'queued', attempts: row.attempts + 1, errorCode: code, token: null, active: !terminal, nextAt: retryAt.getTime() });
   }
@@ -106,16 +118,18 @@ test('rescan exports every captured page once, keeps scopes and freezes an upper
   assert.doesNotMatch(JSON.stringify(f.events), /foreign|new-live-message/);
   assert.ok(f.store.pages.every(page => page.take === 2 && page.instance === 'owner/session'));
   const final = f.events.at(-1)!.data as any; assert.equal(final.phase, 'waiting'); assert.equal(final.expectedChunks, 5); assert.deepEqual(final.expected, done.counts);
-  assert.deepEqual(await f.service.request('owner', 'session', key), done);
+  assert.deepEqual(await f.service.request('owner', 'session', key), { ...done, reused: true, reuseMode: 'idempotent' });
   await assert.rejects(f.service.status('other', 'session', queued.jobId), (error: any) => error.statusCode === 404);
   await f.service.stop();
 });
 
-test('repeating a key shares its durable job, while another key cannot create a second active job', async () => {
+test('repeating a key or using another key reuses the active durable job', async () => {
   const f = setup({ canProduce: async () => false }), key = randomUUID();
   const [first, replay] = await Promise.all([f.service.request('owner', 'session', key), f.service.request('owner', 'session', key)]);
   assert.equal(first.jobId, replay.jobId); assert.equal(f.store.records.size, 1);
-  await assert.rejects(f.service.request('owner', 'session', randomUUID()), (error: any) => error.statusCode === 409);
+  assert.equal(first.reuseMode, null); assert.equal(replay.reuseMode, 'idempotent');
+  const reused = await f.service.request('owner', 'session', randomUUID());
+  assert.equal(reused.jobId, first.jobId); assert.equal(reused.reused, true); assert.equal(reused.reuseMode, 'active'); assert.equal(f.store.records.size, 1);
   await assert.rejects(f.service.request('owner', 'session', 'invalid'), (error: any) => error.statusCode === 400);
   await f.service.stop();
 });
@@ -221,4 +235,115 @@ test('HTTP rescan endpoints enforce authentication, owner/name scope, UUID keys 
   const accepted = await request('owner/session'); assert.equal(accepted.status, 202); assert.equal((await accepted.json()).data.jobId, jobId);
   const status = await request('owner/session/' + jobId, 'GET'); assert.equal(status.status, 200); assert.equal((await status.json()).data.status, 'completed');
   assert.ok(calls.every(call => call[0] === 'owner' && call[1] === 'session'));
+  controller.request = async () => { throw new RequestError(409, 'History synchronization is already in progress.', 'HISTORY_SYNC_IN_PROGRESS'); };
+  const busy = await request('owner/session');
+  assert.equal(busy.status, 409); assert.equal((await busy.json()).code, 'HISTORY_SYNC_IN_PROGRESS');
+});
+
+test('natural history and its pending delivery reject a new rescan without creating or replacing a run', async () => {
+  const store = new MemoryStore(); let natural = true, backlog = false;
+  const service = new HistoryRescanService(store, { exists: async () => true, configured: () => true, connected: () => true,
+    naturalHistoryActive: () => natural, historyPending: async () => backlog, emit: async () => {} });
+  try {
+    const busy = (error: any) => error.statusCode === 409 && error.code === 'HISTORY_SYNC_IN_PROGRESS';
+    await assert.rejects(service.request('owner', 'session', randomUUID()), busy);
+    assert.equal(store.records.size, 0);
+    natural = false; backlog = true;
+    await assert.rejects(service.request('owner', 'session', randomUUID()), busy);
+    assert.equal(store.records.size, 0);
+    backlog = false;
+    assert.equal((await service.request('owner', 'session', randomUUID())).reused, false);
+  } finally { await service.stop(); }
+});
+
+test('natural history starting during a rescan pauses the frozen page without losing identity or consuming retries', async () => {
+  const store = new MemoryStore(); let natural = false, ready = false, clock = Date.now();
+  store.add('owner/session', 'messages', [{ id: 1, data: { key: { id: 'saved' } } }]);
+  const events: RescanEvent[] = [];
+  const service = new HistoryRescanService(store, { exists: async () => true, configured: () => true, connected: () => true,
+    naturalHistoryActive: () => natural, canProduce: async () => ready, now: () => new Date(clock), emit: async (_instance, event) => { events.push(event); } });
+  try {
+    const queued = await service.request('owner', 'session', randomUUID()); await service.runOnce();
+    assert.equal(queued.waitingReason, 'webhook-backlog');
+    ready = true; natural = true; await service.runOnce();
+    const paused = await service.status('owner', 'session', queued.jobId);
+    assert.equal(paused.waitingReason, 'natural-history'); assert.equal(paused.status, 'queued');
+    assert.equal(paused.attempts, 0); assert.equal(events.length, 0);
+    const reused = await service.request('owner', 'session', randomUUID());
+    assert.equal(reused.jobId, queued.jobId); assert.equal(reused.reused, true);
+    await service.runOnce();
+    natural = false; clock += 1000; await service.runOnce();
+    const done = await service.status('owner', 'session', queued.jobId);
+    assert.equal(done.status, 'completed'); assert.equal(done.counts.messages, 1);
+    assert.ok(events.filter(event => event.history).every(event => event.history!.source === 'stored-history'));
+  } finally { await service.stop(); }
+});
+
+test('a completed producer with queued delivery reuses its job until its own run is delivered', async () => {
+  const store = new MemoryStore(); let ready = false, pendingRun: string | undefined;
+  const service = new HistoryRescanService(store, { exists: async () => true, configured: () => true, connected: () => true,
+    canProduce: async () => ready,
+    historyPending: async (_owner, _name, runId) => Boolean(pendingRun && (!runId || runId === pendingRun)),
+    emit: async (_instance, event) => { pendingRun = (event.data as any)?.runId ?? event.history?.runId ?? pendingRun; } });
+  try {
+    const first = await service.request('owner', 'session', randomUUID());
+    await service.runOnce(); ready = true; await service.runOnce();
+    const done = await service.status('owner', 'session', first.jobId);
+    assert.equal(done.status, 'completed'); assert.equal(done.waitingReason, 'webhook-backlog');
+    const replay = await service.request('owner', 'session', randomUUID());
+    assert.equal(replay.reused, true); assert.equal(replay.jobId, first.jobId); assert.equal(store.records.size, 1);
+    pendingRun = undefined;
+    assert.equal((await service.status('owner', 'session', first.jobId)).waitingReason, null);
+    assert.equal((await service.request('owner', 'session', randomUUID())).reused, false);
+  } finally { await service.stop(); }
+});
+
+test('rescan binds each page to the real online transport and refuses a replacement during the read', async () => {
+  const store = new MemoryStore();
+  const oldStamp = new Date(Date.now() - 1000).toISOString(), newStamp = new Date().toISOString();
+  let stamp = oldStamp, deliveries = 0;
+  const snapshot = () => ({ owner: 'owner', instanceName: 'session', connectionStatus: 'ONLINE' as const, connectionState: 'connected' as const, connectionUpdatedAt: stamp });
+  store.add('owner/session', 'contacts', [{ id: 1, data: { id: 'saved' } }]);
+  const page = store.page.bind(store);
+  store.page = async (...args) => { const result = await page(...args); stamp = newStamp; return result; };
+  const service = new HistoryRescanService(store, { exists: async () => true, configured: () => true, connected: () => true, snapshot,
+    emit: async () => { deliveries++; } });
+  try {
+    const job = await service.request('owner', 'session', randomUUID()); await service.runOnce();
+    const failed = await service.status('owner', 'session', job.jobId);
+    assert.equal(failed.status, 'failed'); assert.equal(failed.errorCode, 'HISTORY_CONNECTION_CLOSED'); assert.equal(deliveries, 0);
+  } finally { await service.stop(); }
+});
+
+test('production replay enqueue preserves online snapshot and source, refusing offline or mismatched transport', async () => {
+  const instance = { owner: 'owner', instanceName: 'session', connectionStatus: 'ONLINE' as const, connectionState: 'connected' as const, connectionUpdatedAt: new Date().toISOString() };
+  const event: RescanEvent = { id: randomUUID(), timestamp: new Date().toISOString(), event: 'messages.set', data: [{ id: 'saved' }],
+    history: { source: 'stored-history', runId: randomUUID(), startedAt: new Date().toISOString(), batchId: 'batch', chunkId: 'chunk' } };
+  const calls: any[][] = [];
+  const outbox = { enqueue: async (...args: any[]) => { calls.push(args); return event.id; } };
+  await enqueueRescanEvent(outbox, instance, event, () => ({ ...instance }));
+  assert.deepEqual(calls[0], [event.event, instance, event.data, event.history, { id: event.id, timestamp: event.timestamp }]);
+  const closed = (error: any) => error.code === 'HISTORY_CONNECTION_CLOSED';
+  await assert.rejects(enqueueRescanEvent(outbox, { ...instance, connectionStatus: 'OFFLINE' }, event, () => instance), closed);
+  await assert.rejects(enqueueRescanEvent(outbox, instance, event, () => ({ ...instance, connectionUpdatedAt: '2020-01-01T00:00:00.000Z' })), closed);
+  assert.equal(calls.length, 1);
+});
+
+test('a naturally busy connection yields the rescan worker to other instances without consuming attempts', async () => {
+  const store = new MemoryStore(); let clock = Date.now();
+  const first = await store.begin('owner/busy', randomUUID(), true, new Date(clock));
+  const second = await store.begin('owner/ready', randomUUID(), true, new Date(clock));
+  const delivered: string[] = [];
+  const service = new HistoryRescanService(store, { now: () => new Date(clock), exists: async () => true, configured: () => true,
+    connected: () => true, naturalHistoryActive: key => key === 'owner/busy', emit: async instance => { delivered.push(instance.instanceName); } });
+  try {
+    await service.runOnce();
+    assert.equal(store.records.get(first.id)!.nextAt, clock + 1000);
+    clock += 2000;
+    await service.runOnce();
+    assert.equal((await service.status('owner', 'ready', second.id)).status, 'completed');
+    assert.deepEqual(delivered, ['ready']);
+    const paused = await service.status('owner', 'busy', first.id);
+    assert.equal(paused.status, 'queued'); assert.equal(paused.attempts, 0);
+  } finally { await service.stop(); }
 });

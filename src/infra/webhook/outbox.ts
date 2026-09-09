@@ -13,6 +13,8 @@ export interface WebhookEvent {
   history?: HistoryChunkMetadata;
 }
 interface RecordData { payload: WebhookEvent; attempts: number; nextAttemptAt: number; epoch?: string }
+type HistoryReference = { key: string; runId: string | undefined; epoch: string | undefined };
+type HistoryIndex = Map<string, Set<string | undefined>>;
 export interface OutboxDiagnostic {
   component: "webhook-outbox";
   phase: "enqueue" | "startup" | "retry";
@@ -52,7 +54,10 @@ export class WebhookOutbox {
   private readonly now: () => number;
   private readonly lifecycle: WebhookOutbox | undefined;
   private readonly epochs = new Map<string, string>();
-  private readonly deliveries = new Map<string, { key: string; event: string; controller: AbortController }>();
+  private readonly deliveries = new Map<string, HistoryReference & { event: string; history: boolean; controller: AbortController }>();
+  private readonly historyWrites = new Map<symbol, HistoryReference>();
+  private historyIndex: { value: HistoryIndex; expiresAt: number } | undefined;
+  private historyScan: { promise: Promise<HistoryIndex>; additions: HistoryReference[] } | undefined;
   private lastDiagnostic: { code: string; loggedAt: number } | undefined;
   constructor(private readonly options: OutboxOptions, lifecycleLane = false) {
     this.directory = path.resolve(options.directory);
@@ -90,6 +95,8 @@ export class WebhookOutbox {
     if (identity && (!/^[a-f0-9-]{32,64}$/.test(identity.id) || !Number.isFinite(Date.parse(identity.timestamp)))) throw new Error('Invalid durable event identity');
     const payload = jsonValue<WebhookEvent>({ id: identity?.id ?? randomUUID(), timestamp: identity?.timestamp ?? new Date(this.now()).toISOString(), event, instance, data, ...(history ? { history } : {}) });
     const key = this.instanceKey(payload), epoch = this.epochs.get(key);
+    const completeHistoryWrite = this.trackHistoryWrite(payload, epoch);
+    try {
     if (!this.options.durable) { if (this.options.canDeliver && !this.options.canDeliver(payload)) return undefined; await this.deliver(payload); return payload.id; }
     await fs.mkdir(this.directory, {recursive: true, mode: 0o700});
     const filename = `${this.now()}-${String(this.sequence++).padStart(8, "0")}-${payload.id}.json`;
@@ -98,6 +105,7 @@ export class WebhookOutbox {
     this.pending = true;
     if (!this.stopped) void this.flush().catch(error => this.reportQueueError(error, "enqueue"));
     return payload.id;
+    } finally { completeHistoryWrite(); }
   }
   private async write(filename: string, record: RecordData): Promise<void> {
     const temporary = filename + "." + randomUUID() + ".tmp";
@@ -108,7 +116,8 @@ export class WebhookOutbox {
   }
   private async deliver(payload: WebhookEvent): Promise<void> {
     const controller = new AbortController();
-    this.deliveries.set(payload.id, { key: this.instanceKey(payload), event: payload.event, controller });
+    const key = this.instanceKey(payload);
+    this.deliveries.set(payload.id, { key, epoch: this.epochs.get(key), event: payload.event, history: this.isHistory(payload), runId: this.historyRunId(payload), controller });
     try {
     const response = await (this.options.fetch ?? fetch)(this.options.url, {
       method:"POST", headers:{"Content-Type":"application/json", "X-Webhook-Secret":this.options.secret, "X-Webhook-Id":payload.id},
@@ -128,6 +137,7 @@ export class WebhookOutbox {
   async discardInstance(owner: string, instanceName: string): Promise<void> {
     const key = JSON.stringify([owner, instanceName]), epoch = randomUUID();
     this.epochs.set(key, epoch);
+    this.historyIndex?.value.delete(key);
     for (const task of this.deliveries.values()) if (task.key === key && !task.event.startsWith('connection.')) task.controller.abort();
     for (const directory of [this.directory, path.join(this.directory, 'dead-letter')]) {
       const entries = await fs.readdir(directory, { withFileTypes: true }).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
@@ -255,6 +265,60 @@ export class WebhookOutbox {
     const lifecycle = await this.lifecycle?.stats();
     return {pending:await count(this.directory) + (lifecycle?.pending ?? 0),deadLetter:await count(path.join(this.directory,"dead-letter")) + (lifecycle?.deadLetter ?? 0)};
   }
+  private isHistory(payload: WebhookEvent): boolean {
+    return Boolean(payload.history) || payload.event === 'messaging-history.progress' || ['messages.set', 'chats.set', 'contacts.set'].includes(payload.event);
+  }
+  private historyRunId(payload: WebhookEvent): string | undefined {
+    if (payload.history) return payload.history.runId;
+    const value = payload.event === 'messaging-history.progress' && payload.data && typeof payload.data === 'object' && 'runId' in payload.data ? payload.data.runId : undefined;
+    return typeof value === 'string' ? value : undefined;
+  }
+  private addHistory(index: HistoryIndex, reference: HistoryReference): void {
+    if (reference.epoch !== this.epochs.get(reference.key)) return;
+    const runs = index.get(reference.key) ?? new Set<string | undefined>();
+    runs.add(reference.runId); index.set(reference.key, runs);
+  }
+  private trackHistoryWrite(payload: WebhookEvent, epoch: string | undefined): () => void {
+    if (!this.isHistory(payload)) return () => {};
+    const ticket = Symbol(), reference = { key: this.instanceKey(payload), epoch, runId: this.historyRunId(payload) };
+    this.historyWrites.set(ticket, reference);
+    if (this.historyIndex) this.addHistory(this.historyIndex.value, reference);
+    this.historyScan?.additions.push(reference);
+    return () => { this.historyWrites.delete(ticket); };
+  }
+  private historySnapshot(): Promise<HistoryIndex> {
+    if (this.historyIndex && this.historyIndex.expiresAt > this.now()) return Promise.resolve(this.historyIndex.value);
+    if (this.historyScan) return this.historyScan.promise;
+    const additions: HistoryReference[] = [], epochs = new Map(this.epochs);
+    const promise = (async () => {
+      const index: HistoryIndex = new Map();
+      const files = await fs.readdir(this.directory, { withFileTypes: true }).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
+      for (const file of files) {
+        if (!file.isFile() || !file.name.endsWith('.json')) continue;
+        const record = await this.read(path.join(this.directory, file.name));
+        if (record && !this.discarded(record) && this.isHistory(record.payload)) this.addHistory(index,
+          { key: this.instanceKey(record.payload), runId: this.historyRunId(record.payload), epoch: record.epoch });
+      }
+      // A close may have discarded already-scanned files. New events use the
+      // new epoch and are merged after removing observations from the old one.
+      for (const key of index.keys()) if (epochs.get(key) !== this.epochs.get(key)) index.delete(key);
+      for (const reference of additions) this.addHistory(index, reference);
+      for (const reference of this.historyWrites.values()) this.addHistory(index, reference);
+      this.historyIndex = { value: index, expiresAt: this.now() + 1000 };
+      return index;
+    })();
+    this.historyScan = { promise, additions };
+    void promise.finally(() => { if (this.historyScan?.promise === promise) this.historyScan = undefined; }).catch(() => {});
+    return promise;
+  }
+  /** Shared one-second metadata snapshot for rescan requests and status polls. */
+  async hasPendingHistory(owner: string, instanceName: string, runId?: string): Promise<boolean> {
+    const key = JSON.stringify([owner, instanceName]);
+    const matches = (item: HistoryReference) => item.key === key && item.epoch === this.epochs.get(key) && (!runId || item.runId === runId);
+    if ([...this.deliveries.values()].some(item => item.history && matches(item)) || [...this.historyWrites.values()].some(matches)) return true;
+    const runs = (await this.historySnapshot()).get(key);
+    return Boolean(runs && (!runId || runs.has(runId)));
+  }
   async replayDeadLetters(): Promise<number> {
     const dead = path.join(this.directory,"dead-letter");
     let files: string[];
@@ -266,8 +330,15 @@ export class WebhookOutbox {
       if (this.discarded(record)) { await fs.unlink(path.join(dead, file)).catch(error => { if (error.code !== 'ENOENT') throw error; }); continue; }
       if (this.options.canDeliver && !this.options.canDeliver(record.payload)) continue;
       record.attempts=0;record.nextAttemptAt=0;
-      await this.write(path.join(this.directory,file),record);
-      await fs.unlink(path.join(dead,file));count++;
+      const completeHistoryWrite = this.trackHistoryWrite(record.payload, record.epoch);
+      try {
+        await this.write(path.join(this.directory,file),record);
+        // A close racing the replay must not put an old cancelled run back in
+        // the active directory after discardInstance already scanned it.
+        if (this.discarded(record)) await fs.unlink(path.join(this.directory,file)).catch(error => { if (error.code !== 'ENOENT') throw error; });
+        else count++;
+        await fs.unlink(path.join(dead,file)).catch(error => { if (error.code !== 'ENOENT') throw error; });
+      } finally { completeHistoryWrite(); }
     }
     return count;
   }

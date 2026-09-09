@@ -22,7 +22,7 @@ function allowed(req:Request,owner:string,name?:string):void {
 }
 const handle=(action:(req:Request)=>Promise<unknown>,status=200)=>async(req:Request,res:Response)=>{
   try {res.status(status).json(await action(req));} catch(error) {
-    res.status(error instanceof RequestError ? error.statusCode : 500).json({success:false,error:error instanceof RequestError?error.message:'Unable to process instance request.'});
+    res.status(error instanceof RequestError ? error.statusCode : 500).json({success:false,error:error instanceof RequestError?error.message:'Unable to process instance request.',...(error instanceof RequestError && error.code ? {code:error.code} : {})});
   }
 };
 export default class InstanceRoutes {

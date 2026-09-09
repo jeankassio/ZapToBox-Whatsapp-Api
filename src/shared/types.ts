@@ -41,6 +41,7 @@ export interface WebhookPayload {
 }
 
 export interface HistoryChunkMetadata {
+  source?: 'stored-history';
   runId: string;
   startedAt: string;
   batchId: string;

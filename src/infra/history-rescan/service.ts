@@ -11,6 +11,7 @@ export type RescanCounts = Record<RescanKind, number>;
 export interface RescanState {
   phase: RescanKind | 'done'; cursor: RescanCounts; max: RescanCounts; available: RescanCounts;
   scanned: RescanCounts; counts: RescanCounts; chunks: number; sequence: number;
+  connectionUpdatedAt?: string;
 }
 export interface RescanEvent {
   id: string; timestamp: string; event: string; data: unknown; history?: HistoryChunkMetadata;
@@ -20,9 +21,14 @@ export interface RescanJob {
   id: string; instance: string; idempotencyKey: string; runId: string; status: string;
   state: RescanState; pending: RescanPending | null; attempts: number; errorCode: string | null;
   createdAt: Date; updatedAt: Date; completedAt: Date | null;
+  nextAttemptAt?: Date;
+  reused?: boolean;
 }
 export interface RescanStore {
-  begin(instance: string, key: string, known: boolean, now: Date): Promise<RescanJob>;
+  findByKey(instance: string, key: string): Promise<RescanJob | null>;
+  findActive(instance: string): Promise<RescanJob | null>;
+  findLatestCompleted?(instance: string): Promise<RescanJob | null>;
+  begin(instance: string, key: string, known: boolean, now: Date, connectionUpdatedAt?: string): Promise<RescanJob>;
   get(instance: string, jobId: string): Promise<RescanJob | null>;
   next(now: Date): Promise<string | null>;
   claim(id: string, token: string, until: Date, now: Date): Promise<RescanJob | null>;
@@ -40,6 +46,9 @@ export interface RescanOptions {
   exists(owner: string, name: string): Promise<boolean>;
   canProduce?(): Promise<boolean>;
   connected?(instance: string): boolean;
+  snapshot?(instance: string): InstanceInfo | undefined;
+  naturalHistoryActive?(instance: string): boolean;
+  historyPending?(owner: string, name: string, runId?: string): Promise<boolean>;
   now?: () => Date;
   pageSize?: number;
   pagesPerCycle?: number;
@@ -50,7 +59,8 @@ export function rescanDto(job: RescanJob) {
   return { jobId: job.id, runId: job.runId, status: job.status, phase: job.state.phase,
     counts: job.state.counts, scanned: job.state.scanned, available: job.state.available, chunks: job.state.chunks,
     createdAt: job.createdAt.toISOString(), updatedAt: job.updatedAt.toISOString(), completedAt: job.completedAt?.toISOString() ?? null,
-    errorCode: job.errorCode, attempts: job.attempts, completionMeaning: 'enqueued' };
+    errorCode: job.errorCode, attempts: job.attempts, completionMeaning: 'enqueued',
+    nextAttemptAt: ['queued', 'running'].includes(job.status) ? job.nextAttemptAt?.toISOString() ?? null : null };
 }
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -72,17 +82,42 @@ export class HistoryRescanService {
   async request(owner: string, name: string, key: string) {
     if (!uuid.test(key)) throw new RequestError(400, 'Idempotency-Key must be a UUID v4.');
     if (this.stopped || !this.options.configured()) throw new RequestError(503, 'History delivery is unavailable. Configure the webhook before requesting a rescan.');
-    if (this.options.connected && !this.options.connected(instanceKey(owner, name))) throw new RequestError(409, 'Connect WhatsApp before synchronizing history.');
-    const job = await this.store.begin(instanceKey(owner, name), key.toLowerCase(), await this.options.exists(owner, name), this.now());
+    const instance = instanceKey(owner, name);
+    if (this.options.connected && !this.options.connected(instance)) throw new RequestError(409, 'Connect WhatsApp before synchronizing history.');
+    const prior = await this.store.findByKey(instance, key.toLowerCase());
+    const existing = prior ?? await this.store.findActive(instance);
+    if (existing) { this.wake(); return { ...await this.dto(existing), reused: true, reuseMode: prior ? 'idempotent' : 'active' }; }
+    if (this.options.naturalHistoryActive?.(instance)) throw new RequestError(409, 'History synchronization is already in progress.', 'HISTORY_SYNC_IN_PROGRESS');
+    const known = await this.options.exists(owner, name);
+    const pending = await this.options.historyPending?.(owner, name);
+    if (this.options.naturalHistoryActive?.(instance)) throw new RequestError(409, 'History synchronization is already in progress.', 'HISTORY_SYNC_IN_PROGRESS');
+    if (pending) {
+      const completed = await this.store.findLatestCompleted?.(instance);
+      if (completed && await this.options.historyPending?.(owner, name, completed.runId)) return { ...await this.dto(completed), reused: true, reuseMode: 'active' };
+      throw new RequestError(409, 'History synchronization is already in progress.', 'HISTORY_SYNC_IN_PROGRESS');
+    }
+    if (this.options.connected && !this.options.connected(instance)) throw new RequestError(409, 'Connect WhatsApp before synchronizing history.');
+    const current = this.options.snapshot?.(instance);
+    if (this.options.snapshot && current?.connectionStatus !== 'ONLINE') throw new RequestError(409, 'History connection closed.');
+    const job = await this.store.begin(instance, key.toLowerCase(), known, this.now(), current?.connectionUpdatedAt);
     this.wake();
-    return rescanDto(job);
+    return { ...await this.dto(job), reused: Boolean(job.reused), reuseMode: job.reused ? (job.idempotencyKey === key.toLowerCase() ? 'idempotent' : 'active') : null };
   }
   async cancel(owner: string, name: string, before = this.now()): Promise<void> { await this.store.cancelInstance?.(instanceKey(owner, name), before); }
   async status(owner: string, name: string, id: string) {
     if (!uuid.test(id)) throw new RequestError(400, 'Invalid history job identifier.');
     const job = await this.store.get(instanceKey(owner, name), id.toLowerCase());
     if (!job) throw new RequestError(404, 'History job not found.');
-    return rescanDto(job);
+    return this.dto(job);
+  }
+  private async dto(job: RescanJob) {
+    const { owner, instanceName } = splitInstanceKey(job.instance);
+    let waitingReason: 'natural-history' | 'webhook-backlog' | null = null;
+    if (['queued', 'running'].includes(job.status)) {
+      if (this.options.naturalHistoryActive?.(job.instance)) waitingReason = 'natural-history';
+      else if (this.options.canProduce && !await this.options.canProduce()) waitingReason = 'webhook-backlog';
+    } else if (job.status === 'completed' && await this.options.historyPending?.(owner, instanceName, job.runId)) waitingReason = 'webhook-backlog';
+    return { ...rescanDto(job), waitingReason };
   }
   start() {
     if (this.timer) return;
@@ -99,28 +134,39 @@ export class HistoryRescanService {
     const id = await this.store.next(this.now()); if (!id || this.stopped) return;
     const token = randomUUID(), until = () => new Date(this.now().getTime() + this.leaseMs);
     let job = await this.store.claim(id, token, until(), this.now()); if (!job) return;
+    let releaseAt: Date | undefined;
     try {
       for (let page = 0; page < this.pagesPerCycle && !this.stopped; page++) {
         if (this.options.connected && !this.options.connected(job.instance)) throw new RequestError(409, 'History synchronization stopped because WhatsApp disconnected.');
+        if (this.options.naturalHistoryActive?.(job.instance)) { releaseAt = new Date(this.now().getTime() + 1000); return; }
         if (this.options.canProduce && !await this.options.canProduce()) return;
         if (!await this.store.renew(id, token, until())) return;
+        const identity = splitInstanceKey(job.instance);
+        const snapshot = this.options.snapshot?.(job.instance);
+        if (this.options.snapshot && snapshot?.connectionStatus !== 'ONLINE') throw new RequestError(409, 'History connection closed.');
+        if (snapshot && (job.state.connectionUpdatedAt ? job.state.connectionUpdatedAt !== snapshot.connectionUpdatedAt
+          : Date.parse(snapshot.connectionUpdatedAt ?? '') > job.createdAt.getTime())) throw new RequestError(409, 'History connection changed.', 'HISTORY_CONNECTION_CLOSED');
         const pending: RescanPending = job.pending ?? await this.plan(job);
         if (!job.pending && !await this.store.stage(id, token, pending)) return;
-        const identity = splitInstanceKey(job.instance), instance: InstanceInfo = { ...identity, connectionStatus: 'OFFLINE' };
+        const instance: InstanceInfo = snapshot ?? { ...identity, connectionStatus: 'OFFLINE' };
         for (const event of pending.events) {
           if (this.stopped || !await this.store.renew(id, token, until())) return;
           if (this.options.connected && !this.options.connected(job.instance)) throw new RequestError(409, 'History connection closed.');
+          if (this.options.snapshot && this.options.snapshot(job.instance)?.connectionUpdatedAt !== snapshot?.connectionUpdatedAt) throw new RequestError(409, 'History connection changed.', 'HISTORY_CONNECTION_CLOSED');
+          if (this.options.naturalHistoryActive?.(job.instance)) { releaseAt = new Date(this.now().getTime() + 1000); return; }
           await this.options.emit(instance, event);
         }
+        if (this.options.connected && !this.options.connected(job.instance)) throw new RequestError(409, 'History connection closed.', 'HISTORY_CONNECTION_CLOSED');
+        if (this.options.snapshot && this.options.snapshot(job.instance)?.connectionUpdatedAt !== snapshot?.connectionUpdatedAt) throw new RequestError(409, 'History connection changed.', 'HISTORY_CONNECTION_CLOSED');
         if (!await this.store.advance(id, token, pending, this.now())) return;
         if (pending.complete) return;
         job = { ...job, state: pending.after, pending: null };
       }
     } catch (error) {
       const oversized = error instanceof Error && error.message === 'Webhook entry exceeds supported size';
-      const disconnected = this.options.connected && !this.options.connected(job.instance);
+      const disconnected = (error instanceof RequestError && error.code === 'HISTORY_CONNECTION_CLOSED') || (this.options.connected && !this.options.connected(job.instance));
       await this.store.fail(id, token, disconnected ? 'HISTORY_CONNECTION_CLOSED' : oversized ? 'HISTORY_ENTRY_TOO_LARGE' : 'HISTORY_RESCAN_RETRY', new Date(this.now().getTime() + Math.min(300_000, 2000 * 2 ** Math.min(job.attempts, 7))), Boolean(disconnected) || oversized || job.attempts >= 7);
-    } finally { await this.store.release(id, token, this.now()); }
+    } finally { await this.store.release(id, token, releaseAt ?? this.now()); }
   }
   private async plan(job: RescanJob): Promise<RescanPending> {
     const after = structuredClone(job.state), events: RescanEvent[] = [], stamp = this.now().toISOString();
@@ -129,7 +175,7 @@ export class HistoryRescanService {
       events.push({ id, timestamp: stamp, event, data, ...(history ? { history } : {}) });
     };
     const progress = (phase: 'receiving' | 'waiting') => ({ version: 1, runId: job.runId, startedAt: job.createdAt.toISOString(), resumed: true,
-      sequence: after.sequence, phase, expectedChunks: after.chunks, expected: { ...after.counts }, processedBatches: after.sequence,
+      sequence: after.sequence, phase, active: phase !== 'waiting', expectedChunks: after.chunks, expected: { ...after.counts }, processedBatches: after.sequence,
       source: 'stored-history', provider: { syncType: null, progress: null, isLatest: null, status: null, explicit: null, receivedPendingNotifications: null } });
     if (after.phase === 'done') {
       after.sequence++; emit('messaging-history.progress', progress('waiting'));
@@ -148,7 +194,7 @@ export class HistoryRescanService {
     if (chunks.length) {
       emit('messaging-history.progress', progress('receiving'));
       const batchId = `${job.runId}:${kind}:${job.state.cursor[kind]}`;
-      for (const [index, chunk] of chunks.entries()) emit(`${kind}.set`, chunk, { runId: job.runId, startedAt: job.createdAt.toISOString(), batchId, chunkId: `${batchId}:${index}` });
+      for (const [index, chunk] of chunks.entries()) emit(`${kind}.set`, chunk, { source: 'stored-history', runId: job.runId, startedAt: job.createdAt.toISOString(), batchId, chunkId: `${batchId}:${index}` });
     }
     return jsonValue({ events, after, complete: false });
   }

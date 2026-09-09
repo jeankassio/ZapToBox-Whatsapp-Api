@@ -84,3 +84,24 @@ test('webhook chunk planning preserves all entries and bounds UTF-8 bytes and it
   assert.deepEqual(webhookChunks([]), []);
   assert.throws(() => webhookChunks([{ text: 'x'.repeat(WEBHOOK_CHUNK_BYTES) }]), /exceeds supported size/);
 });
+
+test('natural activity is explicit for queued batches and observed downloads, never inferred from elapsed time', () => {
+  const tracker = new HistoryProgressTracker(true);
+  assert.equal(tracker.activity.active, false);
+  const first = tracker.queueBatch(), second = tracker.queueBatch();
+  assert.equal(tracker.activity.active, true);
+  first(); first();
+  tracker.beginBatch({ syncType: recent }, empty, 0);
+  assert.equal(tracker.importedBatch().active, true, 'a later accepted batch is still queued');
+  second();
+  tracker.beginBatch({ syncType: recent }, empty, 0);
+  assert.equal(tracker.importedBatch().active, false);
+  tracker.download({ syncType: full, progress: 20 });
+  const paused = tracker.providerStatus({ syncType: full, status: 'paused', explicit: false });
+  assert.equal(paused.active, true, 'a timeout does not erase an observed pending download');
+  const sequence = paused.sequence;
+  for (let index = 0; index < 3; index++) assert.equal(tracker.activity.active, true);
+  assert.equal(tracker.snapshot().sequence, sequence + 1, 'readonly activity cannot advance the published sequence');
+  tracker.beginBatch({ syncType: full, progress: 20 }, empty, 0);
+  assert.equal(tracker.importedBatch().active, false);
+});

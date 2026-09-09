@@ -4,7 +4,7 @@ import { instances, instanceStatus } from '../../../shared/constants.js';
 import { instanceKey } from '../../../shared/identity.js';
 
 export class RequestError extends Error {
-  constructor(public statusCode: number, message: string) { super(message); }
+  constructor(public statusCode: number, message: string, public code?: string) { super(message); }
 }
 export type ControllerResult = { success: boolean; message?: string; error?: string; statusCode?: number; data?: any; [key: string]: any };
 export interface ControllerDependencies {

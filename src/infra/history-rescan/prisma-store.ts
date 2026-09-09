@@ -9,17 +9,30 @@ import { zeroCounts, type RescanJob, type RescanKind, type RescanPending, type R
 const convert = (row: HistoryRescanJob): RescanJob => ({ ...row, state: row.state as unknown as RescanState, pending: row.pending as unknown as RescanPending | null });
 export class PrismaRescanStore implements RescanStore {
   constructor(private readonly db: PrismaClient) {}
+  async findByKey(instance: string, key: string): Promise<RescanJob | null> {
+    const row = await this.db.historyRescanJob.findUnique({ where: { instance_idempotencyKey: { instance, idempotencyKey: key } } });
+    return row ? convert(row) : null;
+  }
+  async findActive(instance: string): Promise<RescanJob | null> {
+    const row = await this.db.historyRescanJob.findUnique({ where: { activeInstance: instance } });
+    return row ? convert(row) : null;
+  }
+  async findLatestCompleted(instance: string): Promise<RescanJob | null> {
+    const row = await this.db.historyRescanJob.findFirst({ where: { instance, status: 'completed' }, orderBy: { createdAt: 'desc' } });
+    return row ? convert(row) : null;
+  }
   async cancelInstance(instance: string, before: Date): Promise<void> {
     await this.db.historyRescanJob.updateMany({ where: { instance, status: { in: ['queued', 'running'] }, createdAt: { lte: before } }, data: {
       status: 'failed', errorCode: 'HISTORY_CONNECTION_CLOSED', activeInstance: null, leaseToken: null, leaseUntil: null, pending: Prisma.DbNull, completedAt: before,
     } });
   }
-  async begin(instance: string, key: string, known: boolean, now: Date): Promise<RescanJob> {
+  async begin(instance: string, key: string, known: boolean, now: Date, connectionUpdatedAt?: string): Promise<RescanJob> {
     try {
       return await this.db.$transaction(async tx => {
         const prior = await tx.historyRescanJob.findUnique({ where: { instance_idempotencyKey: { instance, idempotencyKey: key } } });
-        if (prior) return convert(prior);
-        if (await tx.historyRescanJob.findUnique({ where: { activeInstance: instance } })) throw new RequestError(409, 'A history rescan is already in progress for this instance.');
+        if (prior) return { ...convert(prior), reused: true };
+        const active = await tx.historyRescanJob.findUnique({ where: { activeInstance: instance } });
+        if (active) return { ...convert(active), reused: true };
         const [contacts, chats, messages] = await Promise.all([
           tx.contact.aggregate({ where: { instance }, _count: { id: true }, _max: { id: true } }),
           tx.chat.aggregate({ where: { instance }, _count: { id: true }, _max: { id: true } }),
@@ -27,15 +40,17 @@ export class PrismaRescanStore implements RescanStore {
         ]);
         if (!known && !contacts._count.id && !chats._count.id && !messages._count.id) throw new RequestError(404, 'Instance history not found.');
         const state: RescanState = { phase: 'contacts', cursor: zeroCounts(), max: { contacts: contacts._max.id ?? 0, chats: chats._max.id ?? 0, messages: messages._max.id ?? 0 },
-          available: { contacts: contacts._count.id, chats: chats._count.id, messages: messages._count.id }, scanned: zeroCounts(), counts: zeroCounts(), chunks: 0, sequence: 0 };
+          available: { contacts: contacts._count.id, chats: chats._count.id, messages: messages._count.id }, scanned: zeroCounts(), counts: zeroCounts(), chunks: 0, sequence: 0,
+          ...(connectionUpdatedAt ? { connectionUpdatedAt } : {}) };
         return convert(await tx.historyRescanJob.create({ data: { id: randomUUID(), instance, idempotencyKey: key, activeInstance: instance, runId: randomUUID(),
           state: state as unknown as Prisma.InputJsonValue, createdAt: now, nextAttemptAt: now } }));
       }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 15_000 });
     } catch (error) {
       if ((error as { code?: string })?.code !== 'P2002') throw error;
       const prior = await this.db.historyRescanJob.findUnique({ where: { instance_idempotencyKey: { instance, idempotencyKey: key } } });
-      if (prior) return convert(prior);
-      if (await this.db.historyRescanJob.findUnique({ where: { activeInstance: instance } })) throw new RequestError(409, 'A history rescan is already in progress for this instance.');
+      if (prior) return { ...convert(prior), reused: true };
+      const active = await this.db.historyRescanJob.findUnique({ where: { activeInstance: instance } });
+      if (active) return { ...convert(active), reused: true };
       throw error;
     }
   }

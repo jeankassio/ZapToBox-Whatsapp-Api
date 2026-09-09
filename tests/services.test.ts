@@ -658,3 +658,26 @@ test('rapid open-failure loops keep exponential backoff until a connection has b
   f.sockets.at(-1).ev.emit('connection.update', { connection: 'close' }); await f.flush();
   assert.equal((f.instance as any).reconnectAttempts, 1);
 });
+
+test('natural history is marked active before it can wait behind another event', async t => {
+  const f = await fixture(t);
+  f.auth.state.creds.accountSyncCounter = 1;
+  await f.start();
+  assert.equal(f.instance.getHistoryActivity()?.active, false);
+  const entered = deferred(), release = deferred();
+  t.after(() => release.resolve());
+  const save = f.store.saveManyMessages;
+  f.store.saveManyMessages = async (key, messages) => {
+    if (messages[0]?.key.id === 'blocker') { entered.resolve(); await release.promise; }
+    await save(key, messages);
+  };
+  const socket = f.sockets[0];
+  socket.ev.emit('messages.upsert', { type: 'notify', messages: [{ key: { id: 'blocker', remoteJid: '2@lid' }, message: { conversation: 'live' } }] });
+  await entered.promise;
+  socket.config.shouldSyncHistoryMessage({ syncType: 3, progress: 100, directPath: '/history' });
+  assert.equal(f.instance.getHistoryActivity()?.active, true, 'a newly observed download immediately prevents another manual rescan');
+  socket.ev.emit('messaging-history.set', { messages: [], contacts: [], chats: [], syncType: 3, progress: 100 });
+  release.resolve(); await f.flush();
+  assert.equal(f.instance.getHistoryActivity()?.active, false);
+  assert.equal(f.webhooks.at(-1)!.data.active, false);
+});

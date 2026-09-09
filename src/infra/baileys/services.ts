@@ -86,6 +86,7 @@ export default class Instance {
   }
 
   getSock(): WASocket | undefined { return this.sock; }
+  getHistoryActivity() { return this.history?.activity; }
 
   create(data: StartData): Promise<ConnectResult> {
     const key = instanceKey(String(data.owner), String(data.instanceName));
@@ -170,8 +171,9 @@ export default class Instance {
           // Baileys also calls this hook with bare syncType capability probes.
           // Only a real download/inline payload signals incoming history.
           if (PROCESSABLE_HISTORY_TYPES.some(type => type === Number(notification.syncType)) && (notification.directPath || notification.initialHistBootstrapInlinePayload?.length)) {
+            const progress = history.download(notification);
             this.queueEvent('messaging-history.notification', generation, async () => {
-              await this.emit('messaging-history.progress', history.download(notification), generation);
+              await this.emit('messaging-history.progress', progress, generation);
             }, history);
           }
           return true;
@@ -224,8 +226,8 @@ export default class Instance {
     try { old.end(new Error('Local socket stopped')); } catch { /* Already closed. */ }
   }
 
-  private queueEvent(event: string, generation: number, handler: () => Promise<void>, history: HistoryProgressTracker): void {
-    if (this.stopped || generation !== this.generation) return;
+  private queueEvent(event: string, generation: number, handler: () => Promise<void>, history: HistoryProgressTracker): Promise<void> {
+    if (this.stopped || generation !== this.generation) return Promise.resolve();
     const task = this.eventTail.then(async () => {
       if ((this.stopped || generation !== this.generation) && (!this.draining || event === 'connection.update')) return;
       await handler();
@@ -238,6 +240,7 @@ export default class Instance {
     this.eventTail = task;
     this.eventTasks.add(task);
     void task.finally(() => this.eventTasks.delete(task)).catch(() => {});
+    return task;
   }
 
   private backgroundEvent(task: Promise<void>, label: string): void {
@@ -312,12 +315,16 @@ export default class Instance {
           } else if (update.connection === 'open') { this.connectedAt = Date.now(); this.setStatus('ONLINE'); }
           else if (update.connection === 'connecting') this.setStatus('OFFLINE', this.auth?.state.creds.registered ? 'reconnecting' : 'pairing');
         }
-        this.queueEvent(event, generation, () => {
+        const historyBatch = event === 'messaging-history.set';
+        const settleBatch = historyBatch ? history.queueBatch() : undefined;
+        const queued = this.queueEvent(event, generation, () => {
+          settleBatch?.();
           if (socketClosed && event !== 'connection.update') return Promise.resolve();
           const imports = event === 'messaging-history.set' || /^(messages|contacts|chats)\./.test(event);
           if (imports && (this.instance?.connectionStatus !== 'ONLINE' || sock.ws?.isOpen === false)) return Promise.resolve();
           return handler(data);
         }, history);
+        if (settleBatch) void queued.finally(settleBatch).catch(() => {});
       });
     };
     const emit = (event: string, data: unknown, metadata?: HistoryChunkMetadata) => this.emit(event, data, generation, metadata);

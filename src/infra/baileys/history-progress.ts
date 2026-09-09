@@ -10,6 +10,7 @@ export interface HistoryProgress {
   resumed: boolean;
   sequence: number;
   phase: HistoryPhase;
+  active: boolean;
   expectedChunks: number;
   expected: HistoryCounts;
   processedBatches: number;
@@ -29,12 +30,22 @@ const bounded = (value: unknown, maximum: number) => typeof value === 'number' &
 export class HistoryProgressTracker {
   private readonly state: HistoryProgress;
   private pendingDownloads: Metadata[] = [];
+  private queuedBatches = 0;
   constructor(resumed = false, startedAt = new Date().toISOString()) {
-    this.state = { version: 1, runId: randomUUID(), startedAt, resumed, sequence: 0, phase: resumed ? 'waiting' : 'awaiting', expectedChunks: 0,
+    this.state = { version: 1, runId: randomUUID(), startedAt, resumed, sequence: 0, phase: resumed ? 'waiting' : 'awaiting', active: !resumed, expectedChunks: 0,
       expected: { contacts: 0, chats: 0, messages: 0 }, processedBatches: 0,
       provider: { syncType: null, progress: null, isLatest: null, status: null, explicit: null, receivedPendingNotifications: null } };
   }
   get identity() { return { runId: this.state.runId, startedAt: this.state.startedAt }; }
+  get activity() {
+    return { runId: this.state.runId, phase: this.state.phase,
+      active: this.queuedBatches > 0 || this.pendingDownloads.length > 0 || ['awaiting', 'receiving', 'importing'].includes(this.state.phase) };
+  }
+  queueBatch(): () => void {
+    this.queuedBatches++;
+    let settled = false;
+    return () => { if (!settled) { settled = true; this.queuedBatches--; } };
+  }
   private metadata(data: Metadata) {
     const syncType = bounded(data.syncType, 1000);
     if (syncType !== this.state.provider.syncType) { this.state.provider.status = null; this.state.provider.explicit = null; }
@@ -44,6 +55,7 @@ export class HistoryProgressTracker {
   }
   snapshot(phase?: HistoryPhase): HistoryProgress {
     if (phase) this.state.phase = phase;
+    this.state.active = this.activity.active;
     this.state.sequence++;
     return structuredClone(this.state);
   }

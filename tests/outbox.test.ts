@@ -40,6 +40,89 @@ test("offline events retry in order with stable identity and protobuf bytes",asy
   } finally {await state.cleanup();}
 });
 
+test('history backlog lookup scopes connection and run, survives restart, and excludes discarded work', async () => {
+  const state = await setup();
+  try {
+    await state.queue.stop();
+    await state.queue.enqueue('messages.upsert', instance, [{ id: 'live' }]);
+    await state.queue.enqueue('messages.set', { ...instance, owner: 'other' }, [{ id: 'foreign' }]);
+    assert.equal(await state.queue.hasPendingHistory(instance.owner, instance.instanceName), false);
+    const runId = randomUUID();
+    await state.queue.enqueue('messages.set', instance, [{ id: 'history' }], { source: 'stored-history', runId, startedAt: new Date().toISOString(), batchId: 'batch', chunkId: 'chunk' });
+    assert.equal(await state.queue.hasPendingHistory(instance.owner, instance.instanceName), true);
+    assert.equal(await state.queue.hasPendingHistory(instance.owner, instance.instanceName, runId), true);
+    assert.equal(await state.queue.hasPendingHistory(instance.owner, instance.instanceName, randomUUID()), false);
+    const restarted = new WebhookOutbox(state.options); await restarted.stop();
+    assert.equal(await restarted.hasPendingHistory(instance.owner, instance.instanceName, runId), true);
+    await restarted.discardInstance(instance.owner, instance.instanceName);
+    assert.equal(await restarted.hasPendingHistory(instance.owner, instance.instanceName), false);
+    assert.equal(await restarted.hasPendingHistory('other', instance.instanceName), true);
+  } finally { await state.cleanup(); }
+});
+
+test('many history status polls share one metadata scan and immediately see newly enqueued work', async () => {
+  let now = 1000;
+  const state = await setup({ now: () => now });
+  try {
+    await state.queue.stop();
+    await state.queue.enqueue('messages.upsert', instance, [{ id: 'live' }]);
+    const original = (state.queue as any).read.bind(state.queue); let reads = 0;
+    (state.queue as any).read = async (...args: any[]) => { reads++; return original(...args); };
+    const results = await Promise.all(Array.from({ length: 1000 }, (_, id) => state.queue.hasPendingHistory(`owner-${id}`, 'session')));
+    assert.ok(results.every(result => !result)); assert.equal(reads, 1);
+    const runId = randomUUID();
+    await state.queue.enqueue('messaging-history.progress', instance, { runId });
+    assert.equal(await state.queue.hasPendingHistory(instance.owner, instance.instanceName, runId), true);
+    assert.equal(reads, 1, 'a new enqueue updates the shared snapshot without rescanning all payloads');
+    now += 1001;
+    assert.equal(await state.queue.hasPendingHistory(instance.owner, instance.instanceName, runId), true);
+    assert.equal(reads, 3, 'only one new scan runs after the short cache expires');
+  } finally { await state.cleanup(); }
+});
+
+test('history enqueued during an in-flight metadata scan cannot be missed by the cached result', async () => {
+  const state = await setup();
+  let release!: () => void, entered!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; }), start = new Promise<void>(resolve => { entered = resolve; });
+  try {
+    await state.queue.stop();
+    await state.queue.enqueue('messages.upsert', instance, [{ id: 'live' }]);
+    const original = (state.queue as any).read.bind(state.queue);
+    (state.queue as any).read = async (...args: any[]) => { const record = await original(...args); entered(); await gate; return record; };
+    const checking = state.queue.hasPendingHistory(instance.owner, instance.instanceName);
+    await start;
+    const runId = randomUUID();
+    await state.queue.enqueue('messaging-history.progress', instance, { runId });
+    release();
+    assert.equal(await checking, true);
+    assert.equal(await state.queue.hasPendingHistory(instance.owner, instance.instanceName, runId), true);
+  } finally { release(); await state.cleanup(); }
+});
+
+test('dead-letter replay updates a cached negative history snapshot and respects cancellation racing its write', async () => {
+  const state = await setup({ maxAttempts: 1, fetch: async () => new Response(null, { status: 503 }) });
+  try {
+    const runId = randomUUID();
+    await state.queue.enqueue('messaging-history.progress', instance, { runId }); await state.queue.flush();
+    await state.queue.stop();
+    assert.equal(await state.queue.hasPendingHistory(instance.owner, instance.instanceName), false);
+    assert.equal(await state.queue.replayDeadLetters(), 1);
+    assert.equal(await state.queue.hasPendingHistory(instance.owner, instance.instanceName, runId), true);
+
+    // Move it back to dead-letter, then close while replay is writing the file.
+    state.queue.start(); await state.queue.flush(); await state.queue.stop();
+    const original = (state.queue as any).write.bind(state.queue);
+    let entered!: () => void, release!: () => void;
+    const start = new Promise<void>(resolve => { entered = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+    (state.queue as any).write = async (...args: any[]) => { entered(); await gate; return original(...args); };
+    const replay = state.queue.replayDeadLetters(); await start;
+    await state.queue.discardInstance(instance.owner, instance.instanceName);
+    release(); assert.equal(await replay, 0);
+    assert.equal(await state.queue.hasPendingHistory(instance.owner, instance.instanceName), false);
+    assert.deepEqual(await state.queue.stats(), { pending: 0, deadLetter: 0 });
+  } finally { await state.cleanup(); }
+});
+
 test('phone logout has a durable delivery lane independent of a blocked history request', async () => {
   let release!: () => void, entered!: () => void, delivered!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
