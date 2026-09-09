@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { setTimeout as sleep, setImmediate as tick } from 'node:timers/promises';
 import { randomUUID } from 'node:crypto';
-import { DisconnectReason, proto, type WAMessage } from '@whiskeysockets/baileys';
+import { aesEncryptGCM, DisconnectReason, hkdf, proto, type WAMessage } from '@whiskeysockets/baileys';
 import Instance, { type InstanceDependencies } from '../src/infra/baileys/services.js';
 import { createPersistentAuth, type AuthRepository, type AuthEntry } from '../src/infra/state/auth-state.js';
 import { instances, instanceConnection, instanceStatus } from '../src/shared/constants.js';
@@ -216,6 +216,67 @@ test('logout resets credentials while history survives; explicit DELETE removes 
   assert.equal(f.deleted(), 1);
   assert.equal(f.stored.size, 0);
   assert.equal(f.webhooks.at(-1)?.event, 'connection.removed');
+});
+
+test('renewed media metadata is persisted without announcing a message edit', async t => {
+  const f = await fixture(t); await f.start();
+  const key = { id: 'renewed-metadata', remoteJid: '222@s.whatsapp.net' };
+  await f.store.saveMessages(f.key, { key, message: { imageMessage: { caption: 'Legenda original', directPath: '/old' } } });
+  f.sockets[0].ev.emit('messages.update', [{ key, update: { mediaMetadataOnly: true, message: { imageMessage: { caption: 'Legenda original', directPath: '/new' } } } }]);
+  await f.flush();
+  assert.equal(f.stored.get(`${f.key}/${key.id}`)?.message?.imageMessage?.directPath, '/new');
+  assert.equal(f.webhooks.filter(event => event.event === 'messages.update').length, 0);
+  f.sockets[0].ev.emit('messages.update', [{ key, update: { status: 4 } }]); await f.flush();
+  assert.equal(f.webhooks.filter(event => event.event === 'messages.update').length, 1);
+});
+
+test('encrypted media renewal failures never announce available media or forward encrypted transport data', async t => {
+  const f = await fixture(t); await f.start();
+  const stored: WAMessage = { key: { id: 'old-media', remoteJid: '2@lid' }, message: { imageMessage: { mediaKey: Buffer.alloc(32, 1), url: 'https://mmg.whatsapp.net/old' } } };
+  f.stored.set(`${f.key}/old-media`, stored);
+  const key = hkdf(stored.message!.imageMessage!.mediaKey!, 32, { info: 'WhatsApp Media Retry Notification' });
+  for (const success of [false, true]) {
+    const iv = Buffer.alloc(12, success ? 1 : 2);
+    const plaintext = proto.MediaRetryNotification.encode({ result: success ? proto.MediaRetryNotification.ResultType.SUCCESS : proto.MediaRetryNotification.ResultType.NOT_FOUND, directPath: '/v/renewed' }).finish();
+    const ciphertext = aesEncryptGCM(plaintext, key, iv, Buffer.from(stored.key.id!));
+    f.sockets[0].ev.emit('messages.media-update', [{ key: stored.key, media: { ciphertext, iv } }]); await f.flush();
+    const event = f.webhooks.at(-1)!;
+    assert.equal(event.event, 'messages.media-update');
+    assert.deepEqual(event.data, [{ key: stored.key, ...(!success ? { error: { code: 'MEDIA_UNAVAILABLE' } } : {}) }]);
+    assert.doesNotMatch(JSON.stringify(event.data), /ciphertext|mediaKey/);
+  }
+});
+
+test('owner disconnect revokes only its device, preserves history and permits pairing another number', async t => {
+  const a = await fixture(t), b = await fixture(t);
+  await a.start(); await b.start();
+  a.sockets[0].ev.emit('connection.update', { connection: 'open' });
+  b.sockets[0].ev.emit('connection.update', { connection: 'open' });
+  await a.flush(); await b.flush();
+  await a.instance.publishSentMessage({ key: { id: 'keep', remoteJid: '2@lid' }, message: { conversation: 'history' } });
+  let logouts = 0;
+  a.sockets[0].logout = async () => { logouts++; a.sockets[0].ev.emit('connection.update', { connection: 'close', lastDisconnect: { error: { output: { statusCode: DisconnectReason.loggedOut } } } }); };
+  const result = await a.instance.disconnect();
+  assert.equal(result.instance.connectionStatus, 'REMOVED'); assert.equal(result.instance.instanceJid, null);
+  assert.equal(result.instance.profilePictureUrl, undefined); assert.equal(logouts, 1);
+  assert.equal(a.auth.state.creds.registered, false); assert.equal(a.stored.size, 1); assert.equal(a.deleted(), 0);
+  assert.equal(b.auth.state.creds.registered, true); assert.equal(b.sockets[0].ended, 0); assert.equal(instanceStatus.get(b.key), 'ONLINE');
+  await a.instance.disconnect(); assert.equal(logouts, 1, 'replaying disconnect must not send another remote logout');
+  const pairing = a.instance.reconnect();
+  await tick();
+  a.sockets[1].ev.emit('connection.update', { qr: 'new-number-qr' });
+  assert.match((await pairing).qrCode!, /^data:image\/png;base64,/);
+  assert.equal(a.stored.size, 1); assert.equal(a.sockets.length, 2);
+});
+
+test('failed or offline logout preserves credentials instead of claiming a successful remote disconnect', async t => {
+  const f = await fixture(t); await f.start();
+  await assert.rejects(f.instance.disconnect(), (error: any) => error.statusCode === 409);
+  assert.equal(f.auth.state.creds.registered, true);
+  f.sockets[0].ev.emit('connection.update', { connection: 'open' }); await f.flush();
+  f.sockets[0].logout = async () => { throw new Error('private transport detail'); };
+  await assert.rejects(f.instance.disconnect(), (error: any) => error.statusCode === 502 && !error.message.includes('private'));
+  assert.equal(f.auth.state.creds.registered, true); assert.equal(f.sockets[0].ended, 0);
 });
 
 test('event persistence failure disconnects and emits a redacted error notification', async t => {

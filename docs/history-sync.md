@@ -79,4 +79,18 @@ Falhas de persistência, serialização e enqueue que esta API consegue observar
 
 ## Validação
 
+### Recuperação de anexos
+
+O download reconhece os erros HTTP `404`/`410` em `output.statusCode`, formato efetivamente lançado pelo downloader da versão rc14, e pede uma única renovação do endereço ao dispositivo. Mensagens do histórico que contêm apenas `directPath` também são aceitas. A solicitação criptografada de renovação aguarda no máximo 15 segundos e sempre remove seus listeners ao terminar, expirar ou desconectar. A confirmação válida atualiza os metadados pelos eventos já persistidos da instância.
+
+O endpoint autenticado `/media/download/:owner/:instanceName` distingue `404` (mensagem ausente nesta instância), `409` (conexão indisponível), `410` (anexo não recuperável), `504` (dispositivo não respondeu à renovação) e `502` (falha temporária do provedor). O consumidor deve pausar downloads de conexões offline e evitar gastar tentativas de mídia por uma desconexão. A renovação depende da disponibilidade do arquivo no WhatsApp/dispositivo; arquivos já indisponíveis não podem ser garantidos.
+
+O webhook `messages.media-update` publica somente a chave da mensagem e, quando houver, um erro redigido. A API primeiro decifra e valida a confirmação: a presença de dados criptografados no evento bruto não indica sucesso e pode conter `NOT_FOUND`. Uma confirmação de renovação não deve invalidar a tentativa de download já em andamento no consumidor. Fotos de perfil têm prazo de consulta de 10 segundos; foto ausente ou restrita pelo contato retorna `data.status: null`.
+
+### Desconectar para trocar o número
+
+`POST /instances/disconnect/:owner/:instanceName` exige o mesmo escopo autenticado das demais operações da instância e não exige corpo. Solicita a remoção do dispositivo vinculado, drena as gravações, reseta as credenciais e retorna `instance.connectionStatus: "REMOVED"` com `instanceJid: null`. Mensagens, contatos e chats permanecem armazenados. O próximo `connect` permite novo pareamento.
+
+Uma sessão registrada precisa estar online para confirmar o envio do logout (`409` enquanto offline). Falha no envio retorna `502` e preserva as credenciais. Repetir a operação enquanto já desvinculada não envia novo logout. Um integrador deve deduplicar a operação por uma chave persistente para impedir que uma repetição antiga desconecte um pareamento feito posteriormente. `DELETE /instances/delete/...` continua sendo a exclusão explícita dos dados e não deve ser usado para esta finalidade.
+
 Os testes usam sockets, banco em memória e HTTP controlados. Cobrem sinais de 100/isLatest, pausa, ausência de metadados opcionais, downloads pendentes, chunks por bytes/quantidade, mensagens internas filtradas, importação bloqueada, falhas de banco/fila, reentrega de dead-letter e troca de geração. Nenhuma conta WhatsApp real é conectada durante essa verificação.

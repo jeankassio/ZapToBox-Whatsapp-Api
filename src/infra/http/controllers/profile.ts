@@ -11,7 +11,17 @@ export default class ProfileController extends SocketController {
     return { id: result.jid };
   }); }
   fetchStatus(remoteJid: string) { return this.perform('Status fetched.', async sock => ({ status: await sock.fetchStatus(remoteJid) })); }
-  fetchProfilePicture(remoteJid: string) { return this.perform('Profile picture fetched.', async sock => { const status = await sock.profilePictureUrl(remoteJid, 'image'); return { status: status ?? null }; }); }
+  fetchProfilePicture(remoteJid: string) { return this.perform('Profile picture fetched.', async sock => {
+    try { return { status: await sock.profilePictureUrl(remoteJid, 'image', 10_000) ?? null }; }
+    catch (error) {
+      if (this.sock !== sock) throw new RequestError(409, 'Instance not connected.');
+      const status = (error as { output?: { statusCode?: number } })?.output?.statusCode;
+      // An absent/restricted picture is a normal contact state, not a failed
+      // connection. The caller may also try the contact's known LID/PN alias.
+      if (status === 404 || status === 403) return { status: null };
+      throw error;
+    }
+  }); }
   fetchBusinessProfile(remoteJid: string) { return this.perform('Business profile fetched.', async sock => ({ profile: await sock.getBusinessProfile(remoteJid) })); }
   presenceSubscribe(remoteJid: string) { return this.perform('Presence subscribed.', async sock => { await sock.presenceSubscribe(remoteJid); }); }
   profileName(name: string) { return this.perform('Profile name changed.', async sock => { await sock.updateProfileName(name); }); }

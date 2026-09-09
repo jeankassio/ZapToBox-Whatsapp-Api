@@ -56,6 +56,10 @@ export default class InstanceRoutes {
     });
     router.get('/connect/:owner/:instanceName',connect);
     router.post('/connect/:owner/:instanceName',connect);
+    router.post('/disconnect/:owner/:instanceName',handle(async req=>{
+      const owner=identity(req.params.owner,'owner'),name=identity(req.params.instanceName,'instanceName');
+      allowed(req,owner,name);return controller.disconnect(owner,name);
+    }));
     router.post('/history-rescan/:owner/:instanceName',handle(async req=>{
       const owner=identity(req.params.owner,'owner'),name=identity(req.params.instanceName,'instanceName');
       allowed(req,owner,name);

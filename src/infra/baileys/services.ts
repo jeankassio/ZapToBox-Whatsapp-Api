@@ -18,6 +18,8 @@ import { loadInstanceAuth, safeSessionDirectory, type PersistentAuth } from '../
 import { messageTimestamp, serializeBaileys, sourceEdit } from '../mappers/messageMapper.js';
 import { HistoryProgressTracker } from './history-progress.js';
 import { webhookChunks, WEBHOOK_CHUNK_ITEMS } from '../webhook/chunks.js';
+import { RequestError } from '../http/controllers/base.js';
+import { renewedMediaPath } from './media-reupload.js';
 
 type StartData = { owner: string; instanceName: string; phoneNumber?: string | undefined };
 type ConnectResult = { instance: InstanceInfo; qrCode?: string; pairingCode?: string };
@@ -178,7 +180,7 @@ export default class Instance {
     return {
       instance: { owner: info.owner, instanceName: info.instanceName, connectionStatus: info.connectionStatus,
         ...(info.profilePictureUrl ? { profilePictureUrl: info.profilePictureUrl } : {}),
-        ...(info.instanceJid ? { instanceJid: info.instanceJid } : {}) },
+        instanceJid: info.instanceJid ?? null },
       ...(this.qrCode ? { qrCode: this.qrCode } : {}), ...(this.pairingCode ? { pairingCode: this.pairingCode } : {}),
     };
   }
@@ -324,15 +326,32 @@ export default class Instance {
       for (const item of updates) {
         const prior = item.key.id ? await this.dependencies.store.getMessageById(item.key.id, this.key, item.key.remoteJid ?? undefined) : undefined;
         const stored = prior ? await this.dependencies.store.saveMessages(this.key, { ...prior, ...item.update, key: { ...prior.key, ...item.key } }) as any : undefined;
+        // A renewed download URL changes stored transport metadata, not the message's text.
+        if ((item.update as { mediaMetadataOnly?: boolean }).mediaMetadataOnly === true) continue;
         const marker = sourceEdit(stored?.content?.sourceEdit);
         const update = marker ? { ...item.update, sourceEdit: marker } : item.update;
         if (item.update.pollUpdates && prior?.message) {
           results.push({ ...item, update: { ...update, pollVotes: getAggregateVotesInPollMessage({ message: prior.message, pollUpdates: item.update.pollUpdates }) } });
         } else results.push({ ...item, update });
       }
-      await emit('messages.update', results);
+      if (results.length) await emit('messages.update', results);
     });
     on('messages.delete', async data => { await this.dependencies.store.deleteMessages(this.key, data); await emit('messages.delete', data); });
+    on('messages.media-update', async data => {
+      const results = [];
+      for (const item of data) {
+        let error: { code: string } | undefined;
+        try {
+          const prior = item.key.id ? await this.dependencies.store.getMessageById(item.key.id, this.key, item.key.remoteJid ?? undefined) : undefined;
+          if (!prior) throw new RequestError(404, 'Message not found.');
+          renewedMediaPath(prior, item);
+        } catch (failure) {
+          error = { code: failure instanceof RequestError && failure.statusCode === 410 ? 'MEDIA_UNAVAILABLE' : 'MEDIA_RENEWAL_FAILED' };
+        }
+        results.push({ key: item.key, ...(error ? { error } : {}) });
+      }
+      await emit('messages.media-update', results);
+    });
     on('chats.upsert', async data => { await this.dependencies.store.saveManyChats(this.key, data as any); await emit('chats.upsert', data); });
     on('chats.update', async data => { await this.dependencies.store.saveManyChats(this.key, data as any); await emit('chats.update', data); });
     on('chats.delete', async data => { await this.dependencies.store.deleteChats(this.key, data); await emit('chats.delete', data); });
@@ -346,7 +365,7 @@ export default class Instance {
     on('groups.upsert', async data => { for (const group of data) this.groupCache.set(group.id, group); await emit('groups.upsert', data); });
     on('groups.update', async data => { for (const group of data) if (group.id) this.groupCache.del(group.id); await emit('groups.update', data); });
     on('group-participants.update', async data => { this.groupCache.del(data.id); await emit('group-participants.update', data); });
-    const passthrough = ['presence.update', 'messages.media-update', 'messages.reaction', 'message-receipt.update', 'group.join-request', 'blocklist.set', 'blocklist.update', 'call', 'labels.edit', 'labels.association', 'newsletter.reaction', 'newsletter.view', 'newsletter-participants.update', 'newsletter-settings.update'] as const;
+    const passthrough = ['presence.update', 'messages.reaction', 'message-receipt.update', 'group.join-request', 'blocklist.set', 'blocklist.update', 'call', 'labels.edit', 'labels.association', 'newsletter.reaction', 'newsletter.view', 'newsletter-participants.update', 'newsletter-settings.update'] as const;
     for (const event of passthrough) on(event, data => emit(event, data));
   }
 
@@ -435,12 +454,32 @@ export default class Instance {
     delete instanceConnection[this.key]; delete instances[this.key];
   }
 
+  /** Revoke this linked device while preserving the instance and its history. */
+  async disconnect(): Promise<ConnectResult> {
+    if (!this.instance) throw new RequestError(404, 'Instance not found.');
+    const sock = this.sock;
+    if (this.auth?.state.creds.registered) {
+      if (!sock || this.instance.connectionStatus !== 'ONLINE' || (sock.ws && !sock.ws.isOpen)) throw new RequestError(409, 'Instance not connected.');
+      // Do not erase credentials if the remote logout could not be sent.
+      try { await sock.logout('Device disconnected by its owner'); }
+      catch { throw new RequestError(502, 'Unable to disconnect the WhatsApp device.'); }
+    }
+    await this.shutdown();
+    await this.auth?.reset();
+    this.qrCode = undefined; this.pairingCode = undefined; this.phoneNumber = undefined;
+    this.instance.instanceJid = null;
+    delete this.instance.profilePictureUrl;
+    this.setStatus('REMOVED');
+    await this.dependencies.emit('connection.removed', { ...this.instance }, { reason: 'user_initiated' });
+    return this.result();
+  }
+
   async getProfilePicture(): Promise<string | undefined> {
     const sock = this.sock;
     const generation = this.generation;
     if (!sock?.user?.id) return undefined;
     try {
-      const url = await sock.profilePictureUrl(sock.user.id, 'image');
+      const url = await sock.profilePictureUrl(sock.user.id, 'image', 10_000);
       if (generation === this.generation && !this.stopped && this.instance) this.instance.profilePictureUrl = url;
       return url;
     } catch { return undefined; }

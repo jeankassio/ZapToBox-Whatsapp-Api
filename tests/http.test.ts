@@ -53,18 +53,19 @@ async function fixture(t: TestContext, ready: () => Promise<void> = async () => 
 
 function fakeInstance(t: TestContext, owner = 'owner', name = 'session') {
   const key = instanceKey(owner, name);
-  let reconnects = 0, sends = 0, deletes = 0;
+  let reconnects = 0, sends = 0, deletes = 0, disconnects = 0;
   const instance = {
     reconnect: async () => { reconnects++; return { instance: { owner, instanceName: name, connectionStatus: 'OFFLINE' }, qrCode: 'data:image/png;base64,cXI=' }; },
     getSock: () => ({ ws: { isOpen: true }, sendMessage: async () => { sends++; throw new Error('A fake socket must never send'); } }),
     clearInstance: async () => { deletes++; },
+    disconnect: async () => { disconnects++; return { instance: { owner, instanceName: name, connectionStatus: 'REMOVED', instanceJid: null } }; },
   } as unknown as Instance;
   const original = instances[key];
   const oldStatus = instanceStatus.get(key);
   instances[key] = instance;
   instanceStatus.set(key, 'OFFLINE');
   t.after(() => { if (original) instances[key] = original; else delete instances[key]; if (oldStatus) instanceStatus.set(key, oldStatus); else instanceStatus.delete(key); });
-  return { key, get reconnects() { return reconnects; }, get sends() { return sends; }, get deletes() { return deletes; } };
+  return { key, get reconnects() { return reconnects; }, get sends() { return sends; }, get deletes() { return deletes; }, get disconnects() { return disconnects; } };
 }
 
 test('public liveness and authenticated readiness expose only controlled states', async t => {
@@ -113,6 +114,8 @@ test('JWT scope is enforced on every instance mutation and cannot promote admin'
     { path: '/instances/connect/other/session', method: 'GET' },
     { path: '/instances/connect/owner/other', method: 'POST' },
     { path: '/instances/delete/other/session', method: 'DELETE' },
+    { path: '/instances/disconnect/other/session', method: 'POST' },
+    { path: '/instances/disconnect/owner/other', method: 'POST' },
     { path: '/instances/create', method: 'POST', body: { owner: 'other', instanceName: 'new' } },
     { path: '/instances/get?owner=other', method: 'GET' },
     { path: '/webhooks/queue', method: 'GET' },
@@ -122,6 +125,15 @@ test('JWT scope is enforced on every instance mutation and cannot promote admin'
   assert.equal(local.reconnects + foreign.reconnects + foreign.deletes, 0);
   assert.equal((await f.request('/instances/connect/owner/session', { token })).status, 200);
   assert.equal((await f.request('/instances/connect/other/session')).status, 200, 'the configured static token remains an explicit administrator');
+});
+
+test('scoped disconnect revokes a device without deleting the instance or history', async t => {
+  const local = fakeInstance(t); const f = await fixture(t);
+  const result = await f.request('/instances/disconnect/owner/session', { method: 'POST', token: scoped('owner', 'session') });
+  assert.equal(result.status, 200); assert.equal(result.body.success, true);
+  assert.equal(result.body.instance.connectionStatus, 'REMOVED'); assert.equal(local.disconnects, 1); assert.equal(local.deletes, 0);
+  assert.equal((await f.request('/instances/disconnect/owner/session', { method: 'POST', token: null })).status, 401);
+  assert.equal(local.disconnects, 1);
 });
 
 test('instance listing filters both owner and optional instance JWT scope', async t => {

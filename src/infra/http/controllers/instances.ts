@@ -4,7 +4,7 @@ import PrismaConnection, { prisma } from "../../../core/connection/prisma.js";
 import { instances, instanceConnection, instanceStatus, sessionsPath } from "../../../shared/constants.js";
 import { instanceKey } from "../../../shared/identity.js";
 import { publicInstanceInfo } from "../../../shared/instance-info.js";
-import { safeSessionDirectory } from "../../state/auth-state.js";
+import { loadInstanceAuth, safeSessionDirectory } from "../../state/auth-state.js";
 import { removeInstancePath, trySendWebhook } from "../../../shared/utils.js";
 import { RequestError } from "./base.js";
 
@@ -63,6 +63,18 @@ export default class InstancesController {
       await trySendWebhook('connection.removed',{owner,instanceName,connectionStatus:'REMOVED'},{});
     }
     return {success:true,message:'Instance removed successfully'};
+    });
+  }
+  async disconnect(owner:string,instanceName:string) {
+    const key=instanceKey(owner,instanceName);
+    return exclusive(key,async()=>{
+      const instance=instances[key];
+      if(instance) return {success:true,...await instance.disconnect()};
+      const existing=await this.find(owner,instanceName);
+      if(!existing) throw new RequestError(404,'Instance not found.');
+      const auth=await loadInstanceAuth(owner,instanceName);
+      if(auth.state.creds.registered) throw new RequestError(409,'Instance not connected.');
+      return {success:true,instance:{owner,instanceName,connectionStatus:'REMOVED',instanceJid:null}};
     });
   }
   async get(owner?:string) {return {success:true,data:await new InstancesRepository().list(owner)};}

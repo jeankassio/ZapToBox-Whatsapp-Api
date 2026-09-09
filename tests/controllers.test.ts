@@ -251,6 +251,19 @@ test('disconnected controllers return failure instead of optional-chaining succe
   for (const result of await Promise.all(controllers)) { assert.equal(result.success, false); assert.equal(result.statusCode, 409); }
 });
 
+test('profile pictures have a finite lookup deadline and absent/private photos are normal states', async () => {
+  for (const code of [403, 404, 503]) {
+    const socket = { profilePictureUrl: async (remoteJid: string, type: string, timeout: number) => {
+      assert.equal(remoteJid, jid); assert.equal(type, 'image'); assert.equal(timeout, 10_000);
+      throw { output: { statusCode: code }, message: 'private provider details' };
+    } } as unknown as WASocket;
+    const result = await new ProfileController('owner', 'session', { socket }).fetchProfilePicture(jid);
+    if (code === 503) { assert.equal(result.success, false); assert.equal(result.statusCode, 502); }
+    else { assert.equal(result.success, true); assert.deepEqual(result.data, { status: null }); }
+    assert.doesNotMatch(JSON.stringify(result), /private provider details/);
+  }
+});
+
 test('presence updates are awaited and failures do not expose provider errors', async () => {
   const socket = { sendPresenceUpdate: async () => { throw new Error('private-provider-token'); } } as unknown as WASocket;
   const result = await new ChatController('owner', 'session', { socket }).sendPresence('available');
