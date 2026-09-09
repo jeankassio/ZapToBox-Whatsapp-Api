@@ -61,7 +61,7 @@ async function fixture(t: any, options: { registered?: boolean; overrides?: Part
   });
   t.after(async () => { await instance.shutdown(); delete instances[key]; delete instanceConnection[key]; instanceStatus.delete(key); });
   const flush = async () => { await (instance as any).eventTail; };
-  const start = () => instance.create({ owner, instanceName: 'one' });
+  const start = async () => { const result = await instance.create({ owner, instanceName: 'one' }); if (auth.state.creds.registered) instance.setStatus('ONLINE'); return result; };
   return { instance, auth, sockets, webhooks, stored, lookups, store, key, owner, flush, start, deleted: () => deletes, pairingRequests: () => pairingRequests };
 }
 
@@ -143,12 +143,14 @@ test('persisted history slices are delivered early and transport closure is visi
   assert.equal(f.stored.size, 100);
   assert.equal(f.webhooks.filter(item => item.event === 'messages.set').length, 1);
   assert.equal(f.webhooks.find(item => item.event === 'messages.set')!.data.length, 100);
+  f.sockets[0].ev.emit('messaging-history.set', { messages: [{ key: { id: 'queued-after-import', remoteJid: '2@lid' }, message: { conversation: 'pending' } }], chats: [], contacts: [], syncType: 3, progress: 100 });
   f.sockets[0].ev.emit('connection.update', { connection: 'close' });
   assert.equal(instanceStatus.get(f.key), 'OFFLINE', 'status must not wait for the slow history write');
   assert.equal(f.webhooks.some(item => item.event === 'connection.close'), true, 'connection closure bypasses the slow history write');
   release.resolve(); await f.flush();
-  assert.equal(f.stored.size, 251);
-  assert.deepEqual(f.webhooks.filter(item => item.event === 'messages.set').map(item => item.data.length), [100, 100, 51]);
+  assert.equal(f.stored.size, 200, 'only the first persisted slice and the already-running DB write survive');
+  assert.equal([...f.stored.values()].some(message => message.key.id === 'queued-after-import'), false);
+  assert.deepEqual(f.webhooks.filter(item => item.event === 'messages.set').map(item => item.data.length), [100]);
   assert.equal(f.webhooks.filter(item => item.event === 'connection.close').length, 1);
 });
 
@@ -346,6 +348,7 @@ test('owner disconnect revokes only its device, preserves history and permits pa
 
 test('failed or offline logout preserves credentials instead of claiming a successful remote disconnect', async t => {
   const f = await fixture(t); await f.start();
+  f.instance.setStatus('OFFLINE');
   await assert.rejects(f.instance.disconnect(), (error: any) => error.statusCode === 409);
   assert.equal(f.auth.state.creds.registered, true);
   f.sockets[0].ev.emit('connection.update', { connection: 'open' }); await f.flush();

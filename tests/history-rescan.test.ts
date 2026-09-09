@@ -63,6 +63,31 @@ function setup(options: { pageSize?: number; pagesPerCycle?: number; emit?: (eve
   return { store, events, service, later: (ms = 5000) => { time += ms; } };
 }
 
+test('rescan stops before publishing a page if the connection closes during its read', async () => {
+  const store = new MemoryStore(); let online = true, delivered = 0;
+  store.add('owner/session', 'contacts', [{ id: 1, data: { id: 'kept@lid' } }]);
+  const original = store.page.bind(store);
+  store.page = async (...args) => { const rows = await original(...args); online = false; return rows; };
+  const service = new HistoryRescanService(store, { exists: async () => true, configured: () => true, connected: () => online, emit: async () => { delivered++; } });
+  const job = await service.request('owner', 'session', randomUUID()); await service.runOnce();
+  const result = await service.status('owner', 'session', job.jobId);
+  assert.equal(result.status, 'failed'); assert.equal(result.errorCode, 'HISTORY_CONNECTION_CLOSED'); assert.equal(delivered, 0);
+  assert.equal(store.source.get('owner/session:contacts')?.length, 1);
+  await assert.rejects(service.request('owner', 'session', randomUUID()), (error: any) => error.statusCode === 409);
+  await service.stop();
+});
+
+test('rescan cancellation scopes pending data to that connection and excludes jobs created after its close', async () => {
+  const calls: any[] = [];
+  const store = new PrismaRescanStore({ historyRescanJob: { updateMany: async (query: any) => { calls.push(query); return { count: 1 }; } } } as any);
+  const before = new Date('2026-09-09T12:00:00Z');
+  await store.cancelInstance('owner/session', before);
+  assert.deepEqual(calls[0].where, { instance: 'owner/session', status: { in: ['queued', 'running'] }, createdAt: { lte: before } });
+  assert.equal(calls[0].data.status, 'failed'); assert.equal(calls[0].data.errorCode, 'HISTORY_CONNECTION_CLOSED');
+  assert.equal(calls[0].data.activeInstance, null); assert.equal(calls[0].data.leaseToken, null);
+  assert.ok(calls[0].data.pending);
+});
+
 test('rescan exports every captured page once, keeps scopes and freezes an upper ID watermark', async () => {
   const f = setup({ pageSize: 2 });
   f.store.add('owner/session', 'contacts', [{ id: 1, data: { id: 'a@lid', phoneNumber: '5511@s.whatsapp.net' } }]);

@@ -36,7 +36,7 @@ export default class InstancesController {
     const key=instanceKey(owner,instanceName);
     const loaded=instanceConnection[key];
     if(instances[key]) return publicInstanceInfo(loaded ?? {owner,instanceName,connectionStatus:instanceStatus.get(key) ?? 'OFFLINE'});
-    return (await new InstancesRepository().list(owner)).find(row=>row.instanceName===instanceName) ?? null;
+    return new InstancesRepository().find(owner,instanceName);
   }
   async connect(owner:string,instanceName:string) {
     const key=instanceKey(owner,instanceName);

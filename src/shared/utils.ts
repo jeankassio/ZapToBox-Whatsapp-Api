@@ -7,11 +7,16 @@ import type { HistoryChunkMetadata, InstanceData, ProxyAgent } from "./types.js"
 import UserConfig from "../infra/config/env.js";
 import { WebhookOutbox } from "../infra/webhook/outbox.js";
 import { webhookChunks } from "../infra/webhook/chunks.js";
+import { instanceConnection } from './constants.js';
+import { instanceKey } from './identity.js';
+import { cancelMediaDownloads } from '../infra/http/controllers/media-budget.js';
 
 export const webhookOutbox = new WebhookOutbox({
   directory:UserConfig.webhook_queue_dir,url:UserConfig.webhookUrl,secret:UserConfig.webhookSecret,
   timeoutMs:UserConfig.webhookTimeoutMs,maxAttempts:UserConfig.webhookMaxAttempts,
   concurrency:UserConfig.webhookConcurrency,retryMs:UserConfig.webhook_interval,durable:UserConfig.useWebhookQueue,
+  canDeliver: event => event.event.startsWith('connection.') || event.event.startsWith('qrcode.') || event.event.startsWith('pairingcode.')
+    || (instanceConnection[instanceKey(event.instance.owner, event.instance.instanceName)]?.connectionStatus === 'ONLINE'),
 });
 
 export async function removeInstancePath(instancePath:string): Promise<void> {
@@ -44,6 +49,14 @@ export async function genProxy(proxy?:string): Promise<ProxyAgent> {
 }
 
 export async function trySendWebhook(event:string,instance:InstanceData,data:unknown,history?:HistoryChunkMetadata): Promise<void> {
+  if (!event.startsWith('connection.') && !event.startsWith('qrcode.') && !event.startsWith('pairingcode.') && instance.connectionStatus !== 'ONLINE') return;
+  const closed = ['connection.close', 'connection.removed'].includes(event), closedAt = new Date();
+  if (closed) cancelMediaDownloads(instanceKey(instance.owner, instance.instanceName));
+  const discarded = closed ? Promise.all([
+    webhookOutbox.discardInstance(instance.owner, instance.instanceName),
+    import('../infra/history-rescan/index.js').then(({ historyRescan }) => historyRescan.cancel(instance.owner, instance.instanceName, closedAt)),
+  ]) : undefined;
+  void discarded?.catch(() => console.error('Could not clear disconnected instance work.'));
   const info = {
     owner:instance.owner,instanceName:instance.instanceName,connectionStatus:instance.connectionStatus,
     ...(instance.connectionUpdatedAt ? {connectionUpdatedAt:instance.connectionUpdatedAt} : {}),
@@ -57,4 +70,5 @@ export async function trySendWebhook(event:string,instance:InstanceData,data:unk
     if(history && chunks.length!==1)throw new Error('History chunk plan mismatch');
     for(const batch of chunks)await webhookOutbox.enqueue(event,info,batch,history);
   } else await webhookOutbox.enqueue(event,info,data,history);
+  await discarded;
 }

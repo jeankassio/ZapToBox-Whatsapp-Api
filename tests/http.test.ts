@@ -185,7 +185,7 @@ test('create requires a UUID v4 key and exact instance lookup is scoped without 
 
 test('create replays a persisted identity after restart without opening a duplicate socket', async t => {
   const stored = { owner: 'owner', instanceName: 'persisted', connectionStatus: 'OFFLINE' as const, instanceJid: null };
-  t.mock.method(InstancesRepository.prototype, 'list', async (owner?: string) => owner === 'owner' ? [stored] : []);
+  t.mock.method(InstancesRepository.prototype, 'find', async (owner: string, name: string) => owner === 'owner' && name === 'persisted' ? stored : null);
   const before = Object.keys(instances);
   const f = await fixture(t);
   const result = await f.request('/instances/create', { method: 'POST', body: { owner: 'owner', instanceName: 'persisted' } });

@@ -6,6 +6,7 @@ FROM base AS builder
 COPY package.json package-lock.json ./
 COPY prisma ./prisma
 COPY prisma.config.ts tsconfig.json ./
+COPY tools ./tools
 RUN npm ci
 COPY src ./src
 RUN npm run build
@@ -14,9 +15,9 @@ FROM base AS production
 ENV NODE_ENV=production HOST=0.0.0.0 PORT=3001
 COPY package.json package-lock.json prisma.config.ts ./
 COPY prisma ./prisma
+COPY tools ./tools
 RUN npm ci --omit=dev && npx prisma generate
 COPY --from=builder /zaptobox/dist ./dist
-COPY tools ./tools
 RUN mkdir -p sessions webhook-queue && chown -R node:node sessions webhook-queue
 USER node
 EXPOSE 3001

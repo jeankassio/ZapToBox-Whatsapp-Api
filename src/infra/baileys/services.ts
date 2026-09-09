@@ -4,7 +4,7 @@ import makeWASocket, {
   type WAMessage, type WAMessageKey, type WASocket,
   type SignalDataTypeMap,
 } from '@whiskeysockets/baileys';
-import NodeCache from 'node-cache';
+import { BoundedCache } from '../../shared/bounded-cache.js';
 import { pino } from 'pino';
 import QRCode from 'qrcode';
 import { randomUUID } from 'node:crypto';
@@ -66,9 +66,9 @@ export default class Instance {
   private qrCode: string | undefined;
   private pairingCode: string | undefined;
   private history: HistoryProgressTracker | undefined;
-  private msgRetryCounterCache = new NodeCache({ stdTTL: 3600, checkperiod: 0, useClones: false });
-  private userDevicesCache = new NodeCache({ stdTTL: 300, checkperiod: 0, useClones: false });
-  private groupCache = new NodeCache({ stdTTL: 300, checkperiod: 0, useClones: false });
+  private msgRetryCounterCache = new BoundedCache(2048, 3600);
+  private userDevicesCache = new BoundedCache(1024, 300);
+  private groupCache = new BoundedCache(128, 300);
 
   constructor(dependencies: Partial<InstanceDependencies> = {}) {
     this.dependencies = {
@@ -144,7 +144,7 @@ export default class Instance {
       };
       // Release-pinned defaults avoid a remote version fetch on every reconnect.
       const sock = this.dependencies.makeSocket({
-        auth: { creds: auth.state.creds, keys: makeCacheableSignalKeyStore(keys, logger) },
+        auth: { creds: auth.state.creds, keys: makeCacheableSignalKeyStore(keys, logger, new BoundedCache(4096, 300)) },
         browser, emitOwnEvents: true,
         markOnlineOnConnect: false, syncFullHistory: true, generateHighQualityLinkPreview: false,
         shouldSyncHistoryMessage: notification => {
@@ -255,7 +255,12 @@ export default class Instance {
           } else if (update.connection === 'open') this.setStatus('ONLINE');
           else if (update.connection === 'connecting') this.setStatus('OFFLINE');
         }
-        this.queueEvent(event, generation, () => handler(data), history);
+        this.queueEvent(event, generation, () => {
+          if (socketClosed && event !== 'connection.update') return Promise.resolve();
+          const imports = event === 'messaging-history.set' || /^(messages|contacts|chats)\./.test(event);
+          if (imports && (this.instance?.connectionStatus !== 'ONLINE' || sock.ws?.isOpen === false)) return Promise.resolve();
+          return handler(data);
+        }, history);
       });
     };
     const emit = (event: string, data: unknown, metadata?: HistoryChunkMetadata) => this.emit(event, data, generation, metadata);
@@ -320,6 +325,8 @@ export default class Instance {
     });
     on('messaging-history.status', async data => { await emit('messaging-history.progress', history.providerStatus(data)); });
     on('messaging-history.set', async ({ messages, chats, contacts, ...progress }) => {
+      const connected = () => !socketClosed && this.sock === sock && this.instance?.connectionStatus === 'ONLINE' && sock.ws?.isOpen !== false;
+      if (!connected()) return;
       const visibleMessages = this.webhookMessages(messages);
       // Plan all chunks before announcing the watermark. Never silently skip an
       // oversized entry, and count precisely the visible arrays that are sent.
@@ -331,11 +338,15 @@ export default class Instance {
         plans.contacts.length + plans.chats.length + plans.messages.length));
       await emit('messaging-history.progress', history.snapshot('importing'));
       for (const [index, chunk] of plans.contacts.entries()) {
+        if (!connected()) return;
         await this.dependencies.store.saveManyContacts(this.key, chunk as typeof contacts);
+        if (!connected()) return;
         await emit('contacts.set', chunk, metadata('contacts.set', index));
       }
       for (const [index, chunk] of plans.chats.entries()) {
+        if (!connected()) return;
         await this.dependencies.store.saveManyChats(this.key, chunk as any);
+        if (!connected()) return;
         await emit('chats.set', chunk, metadata('chats.set', index));
       }
       // Persist each slice before delivering it; the first messages should not
@@ -344,8 +355,10 @@ export default class Instance {
       // contributing to the visible webhook watermark.
       let savedVisible = 0, deliveredVisible = 0, chunkIndex = 0;
       for (let offset = 0; offset < messages.length; offset += WEBHOOK_CHUNK_ITEMS) {
+        if (!connected()) return;
         const slice = messages.slice(offset, offset + WEBHOOK_CHUNK_ITEMS);
         await this.dependencies.store.saveManyMessages(this.key, slice);
+        if (!connected()) return;
         savedVisible += slice.filter(message => this.isWebhookMessage(message)).length;
         while (chunkIndex < plans.messages.length && deliveredVisible + plans.messages[chunkIndex]!.length <= savedVisible) {
           const chunk = plans.messages[chunkIndex]!;

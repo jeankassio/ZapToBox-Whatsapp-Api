@@ -131,7 +131,7 @@ PostgreSQL armazena mensagens, contatos, conversas e autenticação. A chave int
 
 Credenciais antigas em arquivos são importadas quando o destino ainda não as contém; arquivos corrompidos não são substituídos silenciosamente. Chaves owner_instanceName só migram quando o inventário não é ambíguo. Reinício/reconexão preservam histórico; logout invalida autenticação; DELETE /instances/delete/... remove explicitamente dados locais. O banco do atendimento mantém sua auditoria independente.
 
-Use **um processo por conjunto de sessões e diretório de fila**. Mutexes, sockets, timers e caches são locais; PM2 cluster ou réplicas sobre a mesma sessão exigem coordenação distribuída. Reconexões transitórias têm até cinco tentativas com espera crescente; falhas terminais aguardam novo pareamento/intervenção.
+Use **um processo por conjunto de sessões e diretório de fila**. Mutexes, sockets, timers e caches são locais; PM2 cluster ou réplicas sobre a mesma sessão exigem coordenação distribuída. Reconexões transitórias continuam com espera crescente limitada a 30 segundos; falhas terminais aguardam novo pareamento/intervenção. Consulte a [revisão de escalabilidade](scalability-review.md) antes de aumentar concorrência ou réplicas.
 
 Falhas de armazenamento da fila agora informam PID, fase, código I/O e diretório, sem conteúdo dos eventos ou credenciais. `EACCES`, `ENOTDIR` e `ENOSPC`, por exemplo, distinguem permissões, caminho inválido e disco cheio. Esses erros são separados do retry normal por falha HTTP no destino. Veja [o diagnóstico de inicialização](startup.md) quando mensagens de retry aparecem junto de `EADDRINUSE`.
 

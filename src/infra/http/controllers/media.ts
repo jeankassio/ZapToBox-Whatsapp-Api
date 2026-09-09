@@ -1,6 +1,7 @@
 import { downloadMediaMessage, normalizeMessageContent, getContentType, getUrlFromDirectPath, type WAMessage } from '@whiskeysockets/baileys';
 import { SocketController, RequestError, type ControllerDependencies, type ControllerResult } from './base.js';
 import { reuploadHistoricalMedia } from '../../baileys/media-reupload.js';
+import { collectMedia, mediaDownloadBudget, untilAborted, trackMediaDownload } from './media-budget.js';
 
 type MediaDependencies = ControllerDependencies & { download?: typeof downloadMediaMessage; reupload?: typeof reuploadHistoricalMedia };
 
@@ -14,7 +15,11 @@ export default class MediaController extends SocketController {
   private readonly reupload: typeof reuploadHistoricalMedia;
   constructor(owner: string, instanceName: string, dependencies: MediaDependencies = {}) { super(owner, instanceName, dependencies); this.download = dependencies.download ?? downloadMediaMessage; this.reupload = dependencies.reupload ?? reuploadHistoricalMedia; }
   async getMedia(messageId: string, isBase64 = false): Promise<ControllerResult> {
-    const result = await this.perform('Media downloaded.', async sock => {
+    const result = await this.perform('Media downloaded.', async sock => mediaDownloadBudget.run(async () => {
+      const abort = new AbortController();
+      const releaseTracking = trackMediaDownload(this.instance, abort);
+      const timer = setTimeout(() => abort.abort(), 45_000);
+      try {
       const original = await this.stored(messageId);
       const content = normalizeMessageContent(original.message);
       const type = content ? getContentType(content) : undefined;
@@ -32,15 +37,19 @@ export default class MediaController extends SocketController {
         return this.reupload(sock, candidate);
       };
       let buffer: Buffer;
+      const download = async (candidate: WAMessage, context?: Parameters<typeof downloadMediaMessage>[3]) => {
+        const stream = await untilAborted(this.download(candidate, 'stream', { options: { signal: abort.signal } }, context), abort.signal);
+        return untilAborted(collectMedia(stream, 50 * 1024 * 1024, abort.signal), abort.signal);
+      };
       try {
         try {
-          buffer = await this.download(message, 'buffer', {}, { logger: sock.logger, reuploadRequest: renew });
+          buffer = await download(message, { logger: sock.logger, reuploadRequest: renew });
         } catch (error) {
           // rc14 checks error.status, while its HTTP downloader throws Boom
           // with output.statusCode. Renew once for those real expired URLs too.
           if (renewed || ![404, 410].includes(upstreamStatus(error) ?? 0)) throw error;
-          message = await renew(message);
-          buffer = await this.download(message, 'buffer', {});
+          message = await untilAborted(renew(message), abort.signal);
+          buffer = await download(message);
         }
       } catch (error) {
         // A disconnect is recoverable without exhausting a media retry queue.
@@ -51,7 +60,8 @@ export default class MediaController extends SocketController {
       if (buffer.length > 50 * 1024 * 1024) throw new RequestError(413, 'Media exceeds 50 MB.');
       const mimeType = String((content as Record<string, any>)[type]?.mimetype ?? (type === 'stickerMessage' ? 'image/webp' : 'application/octet-stream'));
       return isBase64 ? { base64: `data:${mimeType};base64,${buffer.toString('base64')}` } : { buffer, mimeType };
-    });
+      } finally { clearTimeout(timer); releaseTracking(); abort.abort(); }
+    }));
     return result.success ? { success: true, ...result.data } : result;
   }
 }

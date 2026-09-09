@@ -32,12 +32,14 @@ export interface RescanStore {
   release(id: string, token: string, now: Date): Promise<void>;
   fail(id: string, token: string, code: string, retryAt: Date, terminal: boolean): Promise<void>;
   page(instance: string, kind: RescanKind, after: number, maximum: number, take: number): Promise<Array<{ id: number; data: unknown | null }>>;
+  cancelInstance?(instance: string, before: Date): Promise<void>;
 }
 export interface RescanOptions {
   emit(instance: InstanceInfo, event: RescanEvent): Promise<void>;
   configured(): boolean;
   exists(owner: string, name: string): Promise<boolean>;
   canProduce?(): Promise<boolean>;
+  connected?(instance: string): boolean;
   now?: () => Date;
   pageSize?: number;
   pagesPerCycle?: number;
@@ -70,10 +72,12 @@ export class HistoryRescanService {
   async request(owner: string, name: string, key: string) {
     if (!uuid.test(key)) throw new RequestError(400, 'Idempotency-Key must be a UUID v4.');
     if (this.stopped || !this.options.configured()) throw new RequestError(503, 'History delivery is unavailable. Configure the webhook before requesting a rescan.');
+    if (this.options.connected && !this.options.connected(instanceKey(owner, name))) throw new RequestError(409, 'Connect WhatsApp before synchronizing history.');
     const job = await this.store.begin(instanceKey(owner, name), key.toLowerCase(), await this.options.exists(owner, name), this.now());
     this.wake();
     return rescanDto(job);
   }
+  async cancel(owner: string, name: string, before = this.now()): Promise<void> { await this.store.cancelInstance?.(instanceKey(owner, name), before); }
   async status(owner: string, name: string, id: string) {
     if (!uuid.test(id)) throw new RequestError(400, 'Invalid history job identifier.');
     const job = await this.store.get(instanceKey(owner, name), id.toLowerCase());
@@ -97,6 +101,7 @@ export class HistoryRescanService {
     let job = await this.store.claim(id, token, until(), this.now()); if (!job) return;
     try {
       for (let page = 0; page < this.pagesPerCycle && !this.stopped; page++) {
+        if (this.options.connected && !this.options.connected(job.instance)) throw new RequestError(409, 'History synchronization stopped because WhatsApp disconnected.');
         if (this.options.canProduce && !await this.options.canProduce()) return;
         if (!await this.store.renew(id, token, until())) return;
         const pending: RescanPending = job.pending ?? await this.plan(job);
@@ -104,6 +109,7 @@ export class HistoryRescanService {
         const identity = splitInstanceKey(job.instance), instance: InstanceInfo = { ...identity, connectionStatus: 'OFFLINE' };
         for (const event of pending.events) {
           if (this.stopped || !await this.store.renew(id, token, until())) return;
+          if (this.options.connected && !this.options.connected(job.instance)) throw new RequestError(409, 'History connection closed.');
           await this.options.emit(instance, event);
         }
         if (!await this.store.advance(id, token, pending, this.now())) return;
@@ -112,7 +118,8 @@ export class HistoryRescanService {
       }
     } catch (error) {
       const oversized = error instanceof Error && error.message === 'Webhook entry exceeds supported size';
-      await this.store.fail(id, token, oversized ? 'HISTORY_ENTRY_TOO_LARGE' : 'HISTORY_RESCAN_RETRY', new Date(this.now().getTime() + Math.min(300_000, 2000 * 2 ** Math.min(job.attempts, 7))), oversized || job.attempts >= 7);
+      const disconnected = this.options.connected && !this.options.connected(job.instance);
+      await this.store.fail(id, token, disconnected ? 'HISTORY_CONNECTION_CLOSED' : oversized ? 'HISTORY_ENTRY_TOO_LARGE' : 'HISTORY_RESCAN_RETRY', new Date(this.now().getTime() + Math.min(300_000, 2000 * 2 ** Math.min(job.attempts, 7))), Boolean(disconnected) || oversized || job.attempts >= 7);
     } finally { await this.store.release(id, token, this.now()); }
   }
   private async plan(job: RescanJob): Promise<RescanPending> {

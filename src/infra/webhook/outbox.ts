@@ -12,7 +12,7 @@ export interface WebhookEvent {
   data: unknown;
   history?: HistoryChunkMetadata;
 }
-interface RecordData { payload: WebhookEvent; attempts: number; nextAttemptAt: number }
+interface RecordData { payload: WebhookEvent; attempts: number; nextAttemptAt: number; epoch?: string }
 export interface OutboxDiagnostic {
   component: "webhook-outbox";
   phase: "enqueue" | "startup" | "retry";
@@ -33,6 +33,7 @@ export interface OutboxOptions {
   fetch?: typeof fetch;
   now?: () => number;
   logError?: (diagnostic: OutboxDiagnostic) => void;
+  canDeliver?: (event: WebhookEvent) => boolean;
 }
 
 const storageErrorCodes = new Set([
@@ -50,6 +51,8 @@ export class WebhookOutbox {
   private readonly directory: string;
   private readonly now: () => number;
   private readonly lifecycle: WebhookOutbox | undefined;
+  private readonly epochs = new Map<string, string>();
+  private readonly deliveries = new Map<string, { key: string; event: string; controller: AbortController }>();
   private lastDiagnostic: { code: string; loggedAt: number } | undefined;
   constructor(private readonly options: OutboxOptions, lifecycleLane = false) {
     this.directory = path.resolve(options.directory);
@@ -86,10 +89,12 @@ export class WebhookOutbox {
     if (!this.options.url) return undefined;
     if (identity && (!/^[a-f0-9-]{32,64}$/.test(identity.id) || !Number.isFinite(Date.parse(identity.timestamp)))) throw new Error('Invalid durable event identity');
     const payload = jsonValue<WebhookEvent>({ id: identity?.id ?? randomUUID(), timestamp: identity?.timestamp ?? new Date(this.now()).toISOString(), event, instance, data, ...(history ? { history } : {}) });
-    if (!this.options.durable) { await this.deliver(payload); return payload.id; }
+    const key = this.instanceKey(payload), epoch = this.epochs.get(key);
+    if (!this.options.durable) { if (this.options.canDeliver && !this.options.canDeliver(payload)) return undefined; await this.deliver(payload); return payload.id; }
     await fs.mkdir(this.directory, {recursive: true, mode: 0o700});
     const filename = `${this.now()}-${String(this.sequence++).padStart(8, "0")}-${payload.id}.json`;
-    await this.write(path.join(this.directory, filename), {payload, attempts:0, nextAttemptAt:0});
+    await this.write(path.join(this.directory, filename), {payload, attempts:0, nextAttemptAt:0, ...(epoch ? { epoch } : {})});
+    if (this.epochs.get(key) !== epoch) { await fs.unlink(path.join(this.directory, filename)).catch(error => { if (error.code !== 'ENOENT') throw error; }); return undefined; }
     this.pending = true;
     if (!this.stopped) void this.flush().catch(error => this.reportQueueError(error, "enqueue"));
     return payload.id;
@@ -102,19 +107,43 @@ export class WebhookOutbox {
     await fs.rename(temporary,filename);
   }
   private async deliver(payload: WebhookEvent): Promise<void> {
+    const controller = new AbortController();
+    this.deliveries.set(payload.id, { key: this.instanceKey(payload), event: payload.event, controller });
+    try {
     const response = await (this.options.fetch ?? fetch)(this.options.url, {
       method:"POST", headers:{"Content-Type":"application/json", "X-Webhook-Secret":this.options.secret, "X-Webhook-Id":payload.id},
-      body:stringify(payload), signal:AbortSignal.timeout(this.options.timeoutMs), redirect:"error",
+      body:stringify(payload), signal:AbortSignal.any([AbortSignal.timeout(this.options.timeoutMs), controller.signal]), redirect:"error",
     });
     await response.body?.cancel();
     if (!response.ok) throw new Error("Webhook HTTP " + response.status);
+    } finally { this.deliveries.delete(payload.id); }
+  }
+  private instanceKey(payload: WebhookEvent): string { return JSON.stringify([payload.instance.owner, payload.instance.instanceName]); }
+  private discarded(record: RecordData): boolean {
+    if (record.payload.event.startsWith('connection.')) return false;
+    const epoch = this.epochs.get(this.instanceKey(record.payload));
+    return epoch !== undefined && record.epoch !== epoch;
+  }
+  /** Clear only this connection's old data/QR work; lifecycle and a new epoch survive. */
+  async discardInstance(owner: string, instanceName: string): Promise<void> {
+    const key = JSON.stringify([owner, instanceName]), epoch = randomUUID();
+    this.epochs.set(key, epoch);
+    for (const task of this.deliveries.values()) if (task.key === key && !task.event.startsWith('connection.')) task.controller.abort();
+    for (const directory of [this.directory, path.join(this.directory, 'dead-letter')]) {
+      const entries = await fs.readdir(directory, { withFileTypes: true }).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
+      for (const item of entries) {
+        if (!item.isFile() || !item.name.endsWith('.json')) continue;
+        const filename = path.join(directory, item.name), record = await this.read(filename);
+        if (record && !record.payload.event.startsWith('connection.') && this.epochs.get(key) === epoch && this.instanceKey(record.payload) === key && record.epoch !== epoch) await fs.unlink(filename).catch(error => { if (error.code !== 'ENOENT') throw error; });
+      }
+    }
   }
   private async quarantine(filename: string, suffix = ""): Promise<void> {
     const dead = path.join(this.directory,"dead-letter");
     await fs.mkdir(dead,{recursive:true,mode:0o700});
-    await fs.rename(filename,path.join(dead,path.basename(filename) + suffix));
+    await fs.rename(filename,path.join(dead,path.basename(filename) + suffix)).catch(error => { if (error.code !== 'ENOENT') throw error; });
   }
-  private async read(filename: string): Promise<RecordData | undefined> {
+  private async read(filename: string, retried = false): Promise<RecordData | undefined> {
     try {
       const raw = JSON.parse(await fs.readFile(filename,"utf8"));
       // Upgrade legacy queue files, ignoring their persisted targetUrl.
@@ -128,6 +157,13 @@ export class WebhookOutbox {
       return record;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      // On Windows a concurrently unlinked file may briefly be delete-pending
+      // and report EPERM rather than ENOENT. Retry once; genuine ACL failures
+      // still surface to queue diagnostics instead of being silently ignored.
+      if (!retried && process.platform === 'win32' && (error as NodeJS.ErrnoException).code === 'EPERM') {
+        await new Promise(resolve => setTimeout(resolve, 10));
+        return this.read(filename, true);
+      }
       if (!(error instanceof SyntaxError) && (error as NodeJS.ErrnoException).code) throw error;
       await this.quarantine(filename,".invalid");
       console.error("Invalid webhook file moved to dead-letter");
@@ -151,33 +187,47 @@ export class WebhookOutbox {
       this.pending = false;
       await fs.mkdir(this.directory,{recursive:true,mode:0o700});
       const entries = await fs.readdir(this.directory,{withFileTypes:true});
-      const groups = new Map<string, {filename:string;record:RecordData}[]>();
+      // Keep only small scheduling metadata, never every pending message body.
+      const groups = new Map<string, { filename: string; timestamp: string; nextAttemptAt: number }[]>();
       for (const file of entries.filter(entry=>entry.isFile() && entry.name.endsWith(".json")).sort((a,b)=>a.name.localeCompare(b.name))) {
         const filename = path.join(this.directory,file.name);
         const record = await this.read(filename);
         if (!record) continue;
         const key = JSON.stringify([record.payload.instance.owner,record.payload.instance.instanceName]);
         const group = groups.get(key) ?? [];
-        group.push({filename,record}); groups.set(key,group);
+        group.push({ filename, timestamp: record.payload.timestamp, nextAttemptAt: record.nextAttemptAt }); groups.set(key,group);
       }
-      const iterator = groups.values();
+      const ready = [...groups.values()].map(items => ({ items: items.sort((a, b) => a.timestamp.localeCompare(b.timestamp) || a.filename.localeCompare(b.filename)), offset: 0 }));
+      let nextGroup = 0;
       const worker = async () => {
-        for (const group of iterator) {
-          group.sort((a,b)=>a.record.payload.timestamp.localeCompare(b.record.payload.timestamp) || a.filename.localeCompare(b.filename));
-          for (const {filename,record} of group) {
-            if (this.stopped || record.nextAttemptAt > this.now()) break;
-            try { await this.deliver(record.payload); await fs.unlink(filename); }
+        while (nextGroup < ready.length && !this.stopped) {
+          const group = ready[nextGroup++]!;
+          let blocked = false;
+          // A large import may use a slot for at most 16 deliveries per turn.
+          for (let sent = 0; sent < 16 && group.offset < group.items.length; sent++) {
+            const item = group.items[group.offset++]!;
+            if (this.stopped || item.nextAttemptAt > this.now()) { blocked = true; break; }
+            const { filename } = item;
+            const record = await this.read(filename);
+            if (!record) continue;
+            if (this.discarded(record)) { await fs.unlink(filename).catch(error => { if (error.code !== 'ENOENT') throw error; }); continue; }
+            if (this.options.canDeliver && !this.options.canDeliver(record.payload)) { blocked = true; break; }
+            try { await this.deliver(record.payload); await fs.unlink(filename).catch(error => { if (error.code !== 'ENOENT') throw error; }); }
             catch {
+              if (this.discarded(record)) { await fs.unlink(filename).catch(error => { if (error.code !== 'ENOENT') throw error; }); blocked = true; break; }
               record.attempts++;
               record.nextAttemptAt = this.now() + Math.min(this.options.retryMs * 2 ** Math.min(record.attempts-1,10),3_600_000);
               await this.write(filename,record);
+              if (this.discarded(record)) { await fs.unlink(filename).catch(error => { if (error.code !== 'ENOENT') throw error; }); blocked = true; break; }
               if (record.attempts >= this.options.maxAttempts) {
                 await this.quarantine(filename);
                 console.error("Webhook retry limit reached; event retained in dead-letter");
               }
-              break;
+              blocked = true; break;
             }
           }
+          if (!blocked && group.offset < group.items.length) ready.push(group);
+          if (nextGroup > 1024 && nextGroup * 2 > ready.length) { ready.splice(0, nextGroup); nextGroup = 0; }
         }
       };
       await Promise.all(Array.from({length:this.options.concurrency},worker));
@@ -213,6 +263,8 @@ export class WebhookOutbox {
     for (const file of files.filter(item=>item.endsWith(".json"))) {
       const record = await this.read(path.join(dead,file));
       if (!record) continue;
+      if (this.discarded(record)) { await fs.unlink(path.join(dead, file)).catch(error => { if (error.code !== 'ENOENT') throw error; }); continue; }
+      if (this.options.canDeliver && !this.options.canDeliver(record.payload)) continue;
       record.attempts=0;record.nextAttemptAt=0;
       await this.write(path.join(this.directory,file),record);
       await fs.unlink(path.join(dead,file));count++;

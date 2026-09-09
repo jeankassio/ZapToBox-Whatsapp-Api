@@ -109,6 +109,65 @@ test('a lifecycle storage failure cannot start a second delivery of an in-flight
   } finally { release(); await state.cleanup(); }
 });
 
+test('one large history import yields its delivery slot to another instance within sixteen events', async () => {
+  const delivered: string[] = [];
+  const state = await setup({ concurrency: 1, fetch: async (_url, init) => { delivered.push(JSON.parse(String(init?.body)).instance.owner); return new Response(null, { status: 204 }); } });
+  try {
+    await state.queue.stop();
+    for (let index = 0; index < 40; index++) await state.queue.enqueue('messages.set', instance, [{ id: index }]);
+    await state.queue.enqueue('messages.upsert', { ...instance, owner: 'another' }, [{ id: 'live' }]);
+    state.queue.start(); await state.queue.flush();
+    assert.ok(delivered.indexOf('another') <= 16);
+    assert.equal(delivered.length, 41);
+    assert.deepEqual(await state.queue.stats(), { pending: 0, deadLetter: 0 });
+  } finally { await state.cleanup(); }
+});
+
+test('disconnect aborts old delivery and clears only its epoch, preserving lifecycle, other tenants and a new pairing', async () => {
+  let entered!: () => void;
+  const busy = new Promise<void>(resolve => { entered = resolve; });
+  const events: string[] = [];
+  const state = await setup({ concurrency: 1, fetch: async (_url, init) => {
+    const body = JSON.parse(String(init?.body)); events.push(body.data.id);
+    if (body.data.id === 'old-flight') {
+      entered();
+      await new Promise<void>((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }));
+    }
+    return new Response(null, { status: 204 });
+  } });
+  try {
+    await state.queue.enqueue('messages.set', instance, { id: 'old-flight' }); await busy;
+    await state.queue.enqueue('messages.set', instance, { id: 'old-pending' });
+    await state.queue.enqueue('messages.set', { ...instance, owner: 'other' }, { id: 'other-tenant' });
+    const clearing = state.queue.discardInstance(instance.owner, instance.instanceName);
+    void clearing.catch(() => {});
+    await state.queue.enqueue('connection.removed', instance, { id: 'removed' });
+    await state.queue.enqueue('messages.set', instance, { id: 'new-pairing' });
+    await clearing; await state.queue.flush();
+    assert.equal(events.filter(id => id === 'old-flight').length, 1);
+    assert.equal(events.includes('old-pending'), false);
+    assert.ok(events.includes('removed') && events.includes('other-tenant') && events.includes('new-pairing'));
+    assert.deepEqual(await state.queue.stats(), { pending: 0, deadLetter: 0 });
+  } finally { await state.queue.discardInstance(instance.owner, instance.instanceName); await state.cleanup(); }
+});
+
+test('offline data is not imported or replayed while connection notifications remain deliverable', async () => {
+  let online = false;
+  const events: string[] = [];
+  const state = await setup({ canDeliver: event => event.event.startsWith('connection.') || online,
+    fetch: async (_url, init) => { events.push(JSON.parse(String(init?.body)).event); return new Response(null, { status: 204 }); } });
+  try {
+    await state.queue.enqueue('messages.set', instance, []); await state.queue.flush();
+    await state.queue.enqueue('connection.close', instance, {}); await state.queue.flush();
+    assert.deepEqual(events, ['connection.close']);
+    assert.equal((await state.queue.stats()).pending, 1);
+    await state.queue.discardInstance(instance.owner, instance.instanceName);
+    online = true; await state.queue.flush();
+    assert.deepEqual(events, ['connection.close']);
+    assert.equal((await state.queue.stats()).pending, 0);
+  } finally { await state.cleanup(); }
+});
+
 test("poison files are isolated and exhausted events remain replayable",async()=>{
   let fail=true;
   const state=await setup({maxAttempts:1,fetch:async()=>new Response(null,{status:fail?500:204})});

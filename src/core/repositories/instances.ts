@@ -6,8 +6,25 @@ import { instanceKey, validateIdentity } from "../../shared/identity.js";
 import { publicInstanceInfo } from "../../shared/instance-info.js";
 import UserConfig from "../../infra/config/env.js";
 import { listDatabaseSessions, safeSessionDirectory } from "../../infra/state/auth-state.js";
+import { prisma } from '../connection/prisma.js';
 
 export default class InstancesRepository {
+  async find(owner: string, instanceName: string): Promise<InstanceInfo | null> {
+    const key = instanceKey(owner, instanceName);
+    const loaded = instanceConnection[key];
+    if (loaded) return publicInstanceInfo(loaded);
+    if (UserConfig.authStore === 'database') {
+      const credentials = await prisma.authState.findUnique({ where: { instance_type_key: { instance: key, type: 'creds', key: 'current' } }, select: { instance: true } });
+      if (credentials) return publicInstanceInfo({ owner, instanceName, connectionStatus: 'OFFLINE' });
+    }
+    try {
+      await safeSessionDirectory(sessionsPath, owner, instanceName);
+      return publicInstanceInfo({ owner, instanceName, connectionStatus: 'OFFLINE' });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    }
+  }
   async list(ownerFilter?:string): Promise<InstanceInfo[]> {
     if(ownerFilter !== undefined) validateIdentity(ownerFilter,'owner');
     const known = new Map<string,{owner:string;instanceName:string}>();

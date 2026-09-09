@@ -9,6 +9,11 @@ import { zeroCounts, type RescanJob, type RescanKind, type RescanPending, type R
 const convert = (row: HistoryRescanJob): RescanJob => ({ ...row, state: row.state as unknown as RescanState, pending: row.pending as unknown as RescanPending | null });
 export class PrismaRescanStore implements RescanStore {
   constructor(private readonly db: PrismaClient) {}
+  async cancelInstance(instance: string, before: Date): Promise<void> {
+    await this.db.historyRescanJob.updateMany({ where: { instance, status: { in: ['queued', 'running'] }, createdAt: { lte: before } }, data: {
+      status: 'failed', errorCode: 'HISTORY_CONNECTION_CLOSED', activeInstance: null, leaseToken: null, leaseUntil: null, pending: Prisma.DbNull, completedAt: before,
+    } });
+  }
   async begin(instance: string, key: string, known: boolean, now: Date): Promise<RescanJob> {
     try {
       return await this.db.$transaction(async tx => {
@@ -66,7 +71,7 @@ export class PrismaRescanStore implements RescanStore {
   }
   async fail(id: string, token: string, code: string, retryAt: Date, terminal: boolean) {
     await this.db.historyRescanJob.updateMany({ where: { id, leaseToken: token, status: 'running' }, data: { status: terminal ? 'failed' : 'queued', attempts: { increment: 1 }, errorCode: code,
-      nextAttemptAt: retryAt, leaseToken: null, leaseUntil: null, ...(terminal ? { activeInstance: null } : {}) } });
+      nextAttemptAt: retryAt, leaseToken: null, leaseUntil: null, ...(terminal ? { activeInstance: null, pending: Prisma.DbNull } : {}) } });
   }
   async page(instance: string, kind: RescanKind, after: number, maximum: number, take: number): Promise<Array<{ id: number; data: unknown | null }>> {
     const query = { where: { instance, id: { gt: after, lte: maximum } }, orderBy: { id: 'asc' as const }, take };
