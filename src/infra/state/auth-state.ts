@@ -154,11 +154,23 @@ export async function createPersistentAuth(repository: AuthRepository, legacyDir
     pending = current.catch(() => {});
     return current;
   };
+  // Keep the latest value (including deletions) until storage confirms it. A
+  // transient failure must not silently roll Signal ratchets back on reconnect.
+  const unsaved = new Map<string, AuthEntry>();
+  const flush = async () => {
+    if (!unsaved.size) return;
+    await repository.write([...unsaved.values()]);
+    unsaved.clear();
+  };
+  const write = (entries: AuthEntry[]) => run(async () => {
+    for (const entry of entries) unsaved.set(JSON.stringify([entry.type, entry.key]), entry);
+    await flush();
+  });
   const state: AuthenticationState = {
     creds,
     keys: {
       async get<T extends keyof SignalDataTypeMap>(type: T, ids: string[]) {
-        await pending;
+        await run(flush);
         const records = await repository.read(type, ids);
         const missing = ids.filter(id => records[id] === undefined);
         const legacy = missing.length ? await repository.read('legacy', missing.map(id => legacyFilename(type, id))) : {};
@@ -180,7 +192,7 @@ export async function createPersistentAuth(repository: AuthRepository, legacyDir
             entries.push({ type: 'legacy', key: legacyFilename(type, key), value: null });
           }
         }
-        return run(() => repository.write(entries));
+        return write(entries);
       },
     },
   };
@@ -188,19 +200,20 @@ export async function createPersistentAuth(repository: AuthRepository, legacyDir
     state,
     saveCreds() {
       const value = serializeBaileys(state.creds);
-      return run(() => repository.write([{ type: 'creds', key: 'current', value }]));
+      return write([{ type: 'creds', key: 'current', value }]);
     },
-    async drain() { await pending; },
+    async drain() { await run(flush); },
     async reset() {
       await run(async () => {
         const fresh = initAuthCreds();
         // Persist a fresh marker to prevent re-importing a logged-out legacy session.
         await repository.replace([{ type: 'creds', key: 'current', value: serializeBaileys(fresh) }]);
+        unsaved.clear();
         for (const key of Object.keys(state.creds)) delete (state.creds as any)[key];
         Object.assign(state.creds, fresh);
       });
     },
-    async remove() { await run(() => repository.clear()); },
+    async remove() { await run(async () => { await repository.clear(); unsaved.clear(); }); },
   };
 }
 

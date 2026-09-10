@@ -10,6 +10,7 @@ import { instances, instanceConnection, instanceStatus } from '../src/shared/con
 import { deserializeBaileys } from '../src/infra/mappers/messageMapper.js';
 import type { HistoryChunkMetadata } from '../src/shared/types.js';
 import { publicInstanceInfo } from '../src/shared/instance-info.js';
+import Sessions from '../src/infra/state/sessions.js';
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
@@ -28,7 +29,8 @@ function memoryAuth(): AuthRepository {
 async function fixture(t: any, options: { registered?: boolean; overrides?: Partial<InstanceDependencies>; initialQR?: boolean } = {}) {
   const owner = `qa_${randomUUID()}`;
   const key = `${owner}/one`;
-  const auth = await createPersistentAuth(memoryAuth());
+  const authRepository = memoryAuth();
+  const auth = await createPersistentAuth(authRepository);
   auth.state.creds.registered = options.registered ?? true;
   const sockets: any[] = [];
   const webhooks: { event: string; data: any; history?: HistoryChunkMetadata }[] = [];
@@ -67,7 +69,7 @@ async function fixture(t: any, options: { registered?: boolean; overrides?: Part
     while ((instance as any).eventTasks.size) await Promise.all([...(instance as any).eventTasks]);
   };
   const start = async () => { const result = await instance.create({ owner, instanceName: 'one' }); if (auth.state.creds.registered) instance.setStatus('ONLINE'); return result; };
-  return { instance, auth, sockets, webhooks, stored, lookups, store, key, owner, flush, start, deleted: () => deletes, pairingRequests: () => pairingRequests };
+  return { instance, auth, authRepository, sockets, webhooks, stored, lookups, store, key, owner, flush, start, deleted: () => deletes, pairingRequests: () => pairingRequests };
 }
 
 test('QR connect polling preserves socket and QR without duplicate events', async t => {
@@ -511,22 +513,113 @@ test('bad-session and restart-required responses retain credentials and retry in
   }
 });
 
-test('replacement or refusal stops automatic retry while retaining authentication for explicit recovery', async t => {
+test('replacement or refusal recovers automatically after cooldown while retaining authentication', async t => {
   for (const reason of [DisconnectReason.connectionReplaced, DisconnectReason.forbidden, DisconnectReason.multideviceMismatch]) {
-    const f = await fixture(t); await f.start();
+    const f = await fixture(t, { overrides: { conflictRetryDelayMs: 60, refusalRetryDelayMs: 60 } }); await f.start();
     const identity = Buffer.from(f.auth.state.creds.noiseKey.private);
     f.sockets[0].ev.emit('connection.update', { connection: 'close', lastDisconnect: { error: { output: { statusCode: reason } } } });
     await f.flush(); await sleep(15);
     assert.equal(f.sockets.length, 1);
     assert.equal(instanceStatus.get(f.key), 'OFFLINE');
-    assert.equal(instanceConnection[f.key]!.connectionState, 'disconnected');
+    assert.equal(instanceConnection[f.key]!.connectionState, 'reconnecting');
     assert.equal(f.auth.state.creds.registered, true);
     assert.deepEqual(f.auth.state.creds.noiseKey.private, identity);
     assert.equal(f.webhooks.some(event => event.event === 'connection.removed'), false);
     await f.instance.reconnect();
+    assert.equal(f.sockets.length, 1, 'panel polling must respect the cooldown');
+    await sleep(80);
     assert.equal(f.sockets.length, 2);
     assert.equal(instanceConnection[f.key]!.connectionState, 'reconnecting');
+    f.sockets[1].ev.emit('connection.update', { connection: 'open' }); await f.flush();
+    assert.equal(instanceStatus.get(f.key), 'ONLINE');
+    assert.deepEqual(f.auth.state.creds.noiseKey.private, identity);
   }
+});
+
+test('session supervision replaces a silently closed socket without panel activity or a new QR', async t => {
+  const f = await fixture(t); await f.start();
+  const supervisor = new Sessions({ discoverFiles: async () => [], useDatabase: () => false, healthIntervalMs: 5 });
+  t.after(() => supervisor.shutdown());
+  await supervisor.start();
+  const old = f.sockets[0]; old.ws = { isOpen: true };
+  old.ev.emit('connection.update', { connection: 'open' }); await f.flush();
+  await sleep(20); assert.equal(f.sockets.length, 1, 'quiet healthy connections stay open');
+  old.ws.isOpen = false; // No connection.update arrives.
+  for (let attempt = 0; attempt < 100 && f.sockets.length < 2; attempt++) await sleep(5);
+  assert.equal(f.sockets.length, 2);
+  assert.equal(old.ended, 1);
+  assert.equal(instanceConnection[f.key]!.connectionState, 'reconnecting');
+  assert.equal(f.auth.state.creds.registered, true);
+  assert.equal(f.deleted(), 0);
+  f.sockets[1].ev.emit('connection.update', { connection: 'open' }); await f.flush();
+  assert.equal(instanceStatus.get(f.key), 'ONLINE');
+  assert.equal(f.webhooks.some(item => /qrcode|connection.removed/.test(item.event)), false);
+  await supervisor.shutdown(); await sleep(20);
+  assert.equal(f.sockets.length, 2, 'shutdown cancels supervision and retries');
+});
+
+test('registered login stuck before connection.open is replaced after the handshake deadline', async t => {
+  const f = await fixture(t); await f.instance.create({ owner: f.owner, instanceName: 'one' });
+  f.sockets[0].ws = { isOpen: true };
+  f.instance.checkHealth();
+  assert.equal(f.sockets[0].ended, 0, 'a new handshake receives time to authenticate');
+  f.instance.checkHealth(Date.now() + 120_001);
+  await sleep(20);
+  assert.equal(f.sockets.length, 2);
+  assert.equal(f.auth.state.creds.registered, true);
+  assert.equal(instanceConnection[f.key]!.connectionState, 'reconnecting');
+});
+
+test('supervision never revives a revoked session or expires a valid QR awaiting pairing', async t => {
+  const unpaired = await fixture(t, { registered: false, initialQR: true });
+  const qr = await unpaired.start();
+  unpaired.instance.checkHealth(Date.now() + 300_000);
+  assert.equal(unpaired.sockets.length, 1); assert.equal(unpaired.sockets[0].ended, 0);
+  assert.equal((await unpaired.instance.reconnect()).qrCode, qr.qrCode);
+  const f = await fixture(t); await f.start();
+  f.sockets[0].ev.emit('connection.update', { connection: 'close', lastDisconnect: { error: { output: { statusCode: DisconnectReason.loggedOut } } } });
+  await f.flush(); f.instance.checkHealth(Date.now() + 300_000); await sleep(20);
+  assert.equal(f.sockets.length, 1); assert.equal(f.auth.state.creds.registered, false);
+  assert.equal(instanceStatus.get(f.key), 'REMOVED');
+});
+
+test('Signal storage failure closes transport and reconnects only after pending keys are saved', async t => {
+  const f = await fixture(t, { overrides: { reconnectDelayMs: 1, reconnectMaxDelayMs: 1 } }); await f.start();
+  const write = f.authRepository.write.bind(f.authRepository);
+  let offline = true;
+  f.authRepository.write = async entries => { if (offline) throw new Error('Storage unavailable'); await write(entries); };
+  t.after(() => { offline = false; });
+  const value = Buffer.from([8, 9, 10]);
+  await assert.rejects(f.sockets[0].config.auth.keys.set({ session: { peer: value } }));
+  assert.equal(f.sockets[0].ended, 1);
+  assert.equal(instanceConnection[f.key]!.connectionState, 'reconnecting');
+  await sleep(20); assert.equal(f.sockets.length, 1, 'never reuse a stale Signal snapshot');
+  offline = false;
+  for (let attempt = 0; attempt < 100 && f.sockets.length < 2; attempt++) await sleep(5);
+  assert.equal(f.sockets.length, 2);
+  assert.deepEqual((await f.sockets[1].config.auth.keys.get('session', ['peer'])).peer, value);
+  assert.equal(f.auth.state.creds.registered, true);
+  assert.equal(f.webhooks.some(item => item.event === 'connection.removed'), false);
+});
+
+test('phone revocation during a failed Signal write resets auth without replaying old keys', async t => {
+  const f = await fixture(t); await f.start();
+  const entered = deferred(), release = deferred();
+  const write = f.authRepository.write.bind(f.authRepository);
+  let attempts = 0;
+  f.authRepository.write = async entries => {
+    if (++attempts === 1) { entered.resolve(); await release.promise; throw new Error('Storage unavailable'); }
+    await write(entries);
+  };
+  const saving = f.sockets[0].config.auth.keys.set({ session: { old: Buffer.from([1]) } });
+  const rejected = assert.rejects(saving);
+  await entered.promise;
+  f.sockets[0].ev.emit('connection.update', { connection: 'close', lastDisconnect: { error: { output: { statusCode: DisconnectReason.loggedOut } } } });
+  release.resolve(); await rejected; await f.flush(); await f.auth.drain();
+  assert.equal(f.auth.state.creds.registered, false);
+  assert.equal((await f.auth.state.keys.get('session', ['old'])).old, undefined);
+  assert.equal(instanceStatus.get(f.key), 'REMOVED');
+  await sleep(20); assert.equal(f.sockets.length, 1);
 });
 
 test('a slow old history write cannot delay recovery or close a replacement when it later fails', async t => {

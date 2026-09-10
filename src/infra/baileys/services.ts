@@ -32,6 +32,9 @@ export interface InstanceDependencies {
   store: Pick<typeof PrismaConnection, 'saveMessages' | 'saveManyMessages' | 'saveManyContacts' | 'getMessageById' | 'deleteByInstance' | 'saveManyChats' | 'deleteChats' | 'deleteMessages'>;
   reconnectDelayMs: number;
   reconnectMaxDelayMs: number;
+  conflictRetryDelayMs: number;
+  refusalRetryDelayMs: number;
+  handshakeTimeoutMs: number;
   random: () => number;
   qrTimeoutMs: number;
   qrLimit: number;
@@ -53,6 +56,7 @@ export default class Instance {
   private generation = 0;
   private reconnectAttempts = 0;
   private connectedAt = 0;
+  private socketStartedAt = 0;
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
   private startTask: Promise<ConnectResult> | undefined;
   private setupTask: Promise<void> | undefined;
@@ -77,6 +81,7 @@ export default class Instance {
     this.dependencies = {
       makeSocket: makeWASocket, loadAuth: loadInstanceAuth, emit: trySendWebhook, store: PrismaConnection,
       reconnectDelayMs: 1000, reconnectMaxDelayMs: 30_000, random: Math.random, qrTimeoutMs: UserConfig.qrCodeTimeout * 1000, qrLimit: UserConfig.qrCodeLimit,
+      conflictRetryDelayMs: 60_000, refusalRetryDelayMs: 300_000, handshakeTimeoutMs: 120_000,
       removeSession: async (owner, name) => {
         try { await removeInstancePath(await safeSessionDirectory(sessionsPath, owner, name)); }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
@@ -151,14 +156,18 @@ export default class Instance {
       const auth = this.auth;
       const history = new HistoryProgressTracker(Boolean(auth.state.creds.accountSyncCounter));
       this.history = history;
+      const authFailure = (error: unknown): never => {
+        this.closeSocket(generation, history, undefined, 'auth.keys');
+        throw error;
+      };
       const keys = {
         get: <T extends keyof SignalDataTypeMap>(type: T, ids: string[]) => {
           if (!active()) return Promise.reject(new Error('Socket is stopped'));
-          return this.trackOperation(() => Promise.resolve(auth.state.keys.get(type, ids)), true);
+          return this.trackOperation(() => Promise.resolve(auth.state.keys.get(type, ids)), true).catch(authFailure);
         },
         set: (data: Parameters<typeof auth.state.keys.set>[0]) => {
           if (!active()) return Promise.reject(new Error('Socket is stopped'));
-          return this.trackOperation(() => Promise.resolve(auth.state.keys.set(data)), true);
+          return this.trackOperation(() => Promise.resolve(auth.state.keys.set(data)), true).catch(authFailure);
         },
       };
       // Release-pinned defaults avoid a remote version fetch on every reconnect.
@@ -191,6 +200,8 @@ export default class Instance {
         getMessage: key => active() ? this.trackOperation(() => this.getMessage(key)) : Promise.resolve(undefined), qrTimeout: this.dependencies.qrTimeoutMs,
       });
       this.sock = sock;
+      this.socketStartedAt = Date.now();
+      this.connectedAt = 0;
       this.instance!.socket = sock;
       this.attachEvents(sock, generation, history);
     })();
@@ -252,9 +263,11 @@ export default class Instance {
   private closeSocket(generation: number, history: HistoryProgressTracker, reason?: number, failedEvent?: string): void {
     if (this.stopped || generation !== this.generation) return;
     const revoked = reason === DisconnectReason.loggedOut;
-    // Replacement means another process owns this device; retrying would fight
-    // that process. These other refusals need attention but do not revoke auth.
-    const retry = !revoked && ![DisconnectReason.connectionReplaced, DisconnectReason.forbidden, DisconnectReason.multideviceMismatch].includes(reason as DisconnectReason);
+    // These responses do not confirm revocation. Keep the session recoverable,
+    // with a longer cooldown to avoid rapidly contesting a replacement or refusal.
+    const retry = !revoked;
+    const cooldown = reason === DisconnectReason.connectionReplaced ? this.dependencies.conflictRetryDelayMs
+      : reason === DisconnectReason.forbidden || reason === DisconnectReason.multideviceMismatch ? this.dependencies.refusalRetryDelayMs : 0;
     // Repeated open→failure loops must also back off. Reset only after a stable
     // minute, without allocating another timer per connected number.
     if (this.connectedAt && Date.now() - this.connectedAt >= 60_000) this.reconnectAttempts = 0;
@@ -278,13 +291,12 @@ export default class Instance {
       const pendingAuth = [...this.authOperations];
       const reset = (async () => {
         await Promise.allSettled(pendingAuth);
-        await this.auth?.drain();
         await this.auth?.reset();
         this.revoked = false;
       })();
       this.backgroundEvent(reset, 'revoked credentials reset');
     }
-    if (retry) this.scheduleReconnect();
+    if (retry) this.scheduleReconnect(cooldown);
     else this.finishInitial();
   }
 
@@ -496,12 +508,13 @@ export default class Instance {
     await this.dependencies.emit(event, { ...this.instance }, serializeBaileys(data), history);
   }
 
-  private scheduleReconnect(): void {
+  private scheduleReconnect(minimumDelayMs = 0): void {
     if (this.stopped || this.retryTimer) { this.finishInitial(); return; }
     // A temporary network outage can last hours. Keep retrying registered
     // sessions with capped backoff; terminal logout reasons never reach here.
     const ceiling = Math.min(this.dependencies.reconnectMaxDelayMs, this.dependencies.reconnectDelayMs * 2 ** Math.min(this.reconnectAttempts++, 16));
-    const wait = Math.max(1, Math.round(ceiling * (0.5 + this.dependencies.random() * 0.5)));
+    const jitter = this.dependencies.random();
+    const wait = Math.max(1, Math.round(ceiling * (0.5 + jitter * 0.5)), Math.round(minimumDelayMs * (1 + jitter * 0.25)));
     this.setStatus('OFFLINE', this.auth?.state.creds.registered || !this.auth ? 'reconnecting' : 'pairing');
     console.info(`[${this.key}] Reconnect attempt=${this.reconnectAttempts} delayMs=${wait}`);
     this.retryTimer = setTimeout(() => {
@@ -520,9 +533,21 @@ export default class Instance {
     if (this.key) instanceStatus.set(this.key, status);
   }
 
+  /** Supervised independently of HTTP polling and the message/history queues. */
+  checkHealth(now = Date.now()): void {
+    if (this.stopped || this.retryTimer || this.setupTask || !this.sock || !this.history || !this.auth?.state.creds.registered) return;
+    const transportClosed = this.instance?.connectionStatus === 'ONLINE' && this.sock.ws?.isOpen === false;
+    const loginStalled = !this.connectedAt && now - this.socketStartedAt >= this.dependencies.handshakeTimeoutMs;
+    if (transportClosed || loginStalled) {
+      console.warn(`[${this.key}] Transport supervision detected ${transportClosed ? 'closed socket without notification' : 'login timeout'}`);
+      this.closeSocket(this.generation, this.history, transportClosed ? DisconnectReason.connectionClosed : DisconnectReason.timedOut);
+    }
+  }
+
   async reconnect(): Promise<ConnectResult> {
     if (!this.key) throw new Error('Instance has not been created');
     if (this.startTask) return this.startTask;
+    this.checkHealth();
     // The front polls connect for QR/status; polling must preserve a live socket.
     if (!this.stopped && (this.sock || this.retryTimer || this.setupTask)) return this.result();
     await this.shutdown();
@@ -552,8 +577,8 @@ export default class Instance {
       this.detachSocket();
       await Promise.all([...this.eventTasks]);
       await Promise.allSettled([...this.socketOperations]);
-      await this.auth?.drain();
       if (this.revoked) { await this.auth?.reset(); this.revoked = false; }
+      else await this.auth?.drain();
       if (this.instance?.connectionStatus !== 'REMOVED') this.setStatus('OFFLINE');
       if (activeHistory && this.instance) {
         await this.dependencies.emit('messaging-history.progress', { ...this.instance }, activeHistory.snapshot('interrupted'));

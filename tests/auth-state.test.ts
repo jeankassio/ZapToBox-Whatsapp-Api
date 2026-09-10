@@ -95,6 +95,46 @@ test('filesystem atomic snapshot roundtrip and corruption fails without replacin
   assert.equal(await readFile(path.join(directory, 'auth-state.json'), 'utf8'), '{corrupt');
 });
 
+test('failed Signal writes stay pending and must become durable before credentials are reused', async () => {
+  const repo = memoryAuthRepository(), auth = await createPersistentAuth(repo);
+  const write = repo.write.bind(repo);
+  let unavailable = true;
+  repo.write = async entries => { if (unavailable) throw new Error('Temporary storage outage'); await write(entries); };
+  const key = Buffer.from([7, 6, 5]);
+  await assert.rejects(auth.state.keys.set({ session: { peer: key }, 'device-list': { peer: ['1'] } }));
+  await assert.rejects(auth.drain(), 'drain must not report success with lost Signal keys');
+  unavailable = false;
+  await auth.drain();
+  const loaded = await createPersistentAuth(repo);
+  assert.deepEqual((await loaded.state.keys.get('session', ['peer'])).peer, key);
+  assert.deepEqual((await loaded.state.keys.get('device-list', ['peer'])).peer, ['1']);
+});
+
+test('a later credentials save cannot discard a failed Signal write and pending deletes stay deleted', async () => {
+  const repo = memoryAuthRepository(), auth = await createPersistentAuth(repo);
+  await auth.state.keys.set({ session: { deleted: Buffer.from([1]) } });
+  const write = repo.write.bind(repo);
+  repo.write = async () => { throw new Error('Temporary storage outage'); };
+  await assert.rejects(auth.state.keys.set({ session: { peer: Buffer.from([2]), deleted: null } }));
+  repo.write = write;
+  auth.state.creds.registered = true; await auth.saveCreds();
+  const loaded = await createPersistentAuth(repo);
+  assert.equal(loaded.state.creds.registered, true);
+  assert.deepEqual((await loaded.state.keys.get('session', ['peer'])).peer, Buffer.from([2]));
+  assert.equal((await loaded.state.keys.get('session', ['deleted'])).deleted, undefined);
+});
+
+test('revocation discards unsaved Signal keys instead of replaying them into fresh credentials', async () => {
+  const repo = memoryAuthRepository(), auth = await createPersistentAuth(repo);
+  const write = repo.write.bind(repo);
+  repo.write = async () => { throw new Error('Temporary storage outage'); };
+  await assert.rejects(auth.state.keys.set({ session: { peer: Buffer.from([3]) } }));
+  repo.write = write;
+  await auth.reset(); await auth.drain();
+  assert.equal(auth.state.creds.registered, false);
+  assert.equal((await auth.state.keys.get('session', ['peer'])).peer, undefined);
+});
+
 test('session identities prevent traversal, retain legacy names, reject junction escape and detect collisions', async t => {
   const root = await fixture(t);
   assert.equal(instanceKey('a_b', 'c'), 'a_b/c');

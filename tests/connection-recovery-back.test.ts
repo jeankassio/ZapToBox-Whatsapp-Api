@@ -50,7 +50,8 @@ test('API lifecycle and HTTP observations converge on the backend after recovery
     async saveManyContacts() {}, async saveManyChats() {}, async getMessageById() { return undefined; },
     async deleteByInstance() {}, async deleteChats() {}, async deleteMessages() {},
   };
-  const instance = new Instance({ loadAuth: async () => auth, store, reconnectDelayMs: 10, reconnectMaxDelayMs: 10, removeSession: async () => {},
+  const instance = new Instance({ loadAuth: async () => auth, store, reconnectDelayMs: 10, reconnectMaxDelayMs: 10,
+    conflictRetryDelayMs: 10, refusalRetryDelayMs: 10, removeSession: async () => {},
     makeSocket(config) {
       const socket = { ev: new EventEmitter(), authState: config.auth, user: { id: jid }, ws: { isOpen: false },
         end() { socket.ws.isOpen = false; }, profilePictureUrl: async () => undefined };
@@ -94,13 +95,28 @@ test('API lifecycle and HTTP observations converge on the backend after recovery
     await until(async () => (await dto()).status === 'reconnecting');
     await until(() => sockets.length === 3); assert.equal(auth.state.creds.registered, true);
     open(sockets[2]); await until(async () => (await dto()).status === 'connected');
+    // A conflict/refusal preserves the linked device and needs no panel click.
+    for (const reason of [440, 403, 411]) {
+      const count = sockets.length;
+      close(sockets.at(-1), reason);
+      await until(async () => (await dto()).status === 'reconnecting');
+      await until(() => sockets.length === count + 1);
+      assert.equal(auth.state.creds.registered, true);
+      open(sockets.at(-1)); await until(async () => (await dto()).status === 'connected');
+    }
+    // Supervision also repairs a lost close notification through the same HTTP/webhook contract.
+    sockets.at(-1).ws.isOpen = false;
+    instance.checkHealth();
+    await until(async () => (await dto()).status === 'reconnecting');
+    await until(() => sockets.length === 7);
+    open(sockets.at(-1)); await until(async () => (await dto()).status === 'connected');
     const priorOpen = payloads.filter(payload => payload.event === 'connection.open').at(-1);
-    close(sockets[2], 401);
+    close(sockets.at(-1), 401);
     await until(async () => (await dto()).status === 'disconnected' && auth.state.creds.registered === false);
     assert.equal((await dto()).owner, null);
     await post(priorOpen); assert.equal((await dto()).status, 'disconnected');
     await statuses.refresh(1, true); assert.equal((await dto()).status, 'disconnected');
-    assert.equal(sockets.length, 3);
+    assert.equal(sockets.length, 7);
   } finally {
     await instance.shutdown(); await statuses.stop();
     delete instances[key]; delete instanceConnection[key]; instanceStatus.delete(key);

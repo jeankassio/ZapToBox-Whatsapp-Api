@@ -56,3 +56,19 @@ test('startup discovery outages retry and shutdown cancels that recovery timer',
   await sleep(15); await sessions.start();
   assert.equal(calls, afterShutdown);
 });
+
+test('one failed shutdown cannot release storage before every other instance has drained', async t => {
+  const prefix = `drain_${randomUUID()}`, failedKey = `${prefix}/failed`, slowKey = `${prefix}/slow`;
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  instances[failedKey] = { async shutdown() { throw new Error('Auth write unavailable'); } } as unknown as Instance;
+  instances[slowKey] = { async shutdown() { await pending; } } as unknown as Instance;
+  t.after(() => { release(); delete instances[failedKey]; delete instances[slowKey]; });
+  const sessions = new Sessions();
+  let finished = false;
+  const stopping = sessions.shutdown().finally(() => { finished = true; });
+  const assertion = assert.rejects(stopping, AggregateError);
+  await sleep(10);
+  assert.equal(finished, false, 'database and webhook shutdown must wait for the slow instance');
+  release(); await assertion; assert.equal(finished, true);
+});

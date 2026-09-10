@@ -17,6 +17,7 @@ interface SessionDependencies {
   createInstance: (auth: PersistentAuth) => Instance;
   retryDelayMs: number;
   retryMaxDelayMs: number;
+  healthIntervalMs: number;
   random: () => number;
 }
 
@@ -52,6 +53,7 @@ export default class Sessions {
   private stopped = false;
   private starting: Promise<void> | undefined;
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
+  private healthTimer: ReturnType<typeof setInterval> | undefined;
   private attempts = 0;
   private readonly dependencies: SessionDependencies;
 
@@ -62,6 +64,7 @@ export default class Sessions {
       migrate: (owner, name) => PrismaConnection.migrateLegacyInstanceKey(owner, name),
       loadAuth: loadInstanceAuth, createInstance: auth => new Instance({ loadAuth: async () => auth }),
       retryDelayMs: 1000, retryMaxDelayMs: 30_000, random: Math.random,
+      healthIntervalMs: 15_000,
       ...dependencies,
     };
   }
@@ -69,6 +72,17 @@ export default class Sessions {
   start(): Promise<void> {
     if (this.starting) return this.starting;
     if (this.stopped) return Promise.resolve();
+    // One supervisor for all instances, including ones created later by HTTP.
+    // Healthy sockets use Baileys keepalive; this does not issue extra requests.
+    if (!this.healthTimer) {
+      this.healthTimer = setInterval(() => {
+        for (const [key, instance] of Object.entries(instances)) {
+          try { instance.checkHealth(); }
+          catch { console.error(`[${key}] Session supervision failed; credentials preserved`); }
+        }
+      }, this.dependencies.healthIntervalMs);
+      this.healthTimer.unref();
+    }
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = undefined;
     const task = this.restore().catch(() => {
@@ -133,8 +147,18 @@ export default class Sessions {
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = undefined;
     // Stop current sockets promptly, then catch any setup that was already in progress.
-    await Promise.all(Object.values(instances).map(instance => instance.shutdown()));
+    if (this.healthTimer) clearInterval(this.healthTimer);
+    this.healthTimer = undefined;
+    const failures: unknown[] = [];
+    const drain = async () => {
+      const settled = await Promise.allSettled(Object.values(instances).map(instance => instance.shutdown()));
+      for (const result of settled) if (result.status === 'rejected') failures.push(result.reason);
+    };
+    // A failed auth write must not let runtime disconnect the database while
+    // another instance still drains accepted writes against that database.
+    await drain();
     await this.starting?.catch(() => {});
-    await Promise.all(Object.values(instances).map(instance => instance.shutdown()));
+    await drain();
+    if (failures.length) throw new AggregateError(failures, 'Session shutdown failed');
   }
 }
