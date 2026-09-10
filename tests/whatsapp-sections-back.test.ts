@@ -13,6 +13,7 @@ import Token from '../src/infra/state/auth.js';
 import InstanceRoutes from '../src/infra/http/routes/instances.js';
 import SectionsController from '../src/infra/http/controllers/sections.js';
 import type { SpaceRecord } from '../src/infra/mappers/spaces.js';
+import { ContactMapper, mergeContactNames } from '../src/infra/mappers/contactMapper.js';
 
 // Run with QA_BACKEND_PATH set to the adjacent backend. Both the backend HTTP
 // server and webhooks are real; the WhatsApp transport and auth store are isolated.
@@ -33,12 +34,18 @@ test('API history and live webhooks keep empty chats and status out of conversat
   });
   auth.state.creds.registered = true;
   const ev = new EventEmitter();
+  const contacts = new Map<string, any>();
   const socket: any = { ev, ws: { isOpen: true }, authState: auth.state, user: { id: '5511990000000@s.whatsapp.net' },
     end() { socket.ws.isOpen = false; }, async profilePictureUrl() { return undefined; }, async groupFetchAllParticipating() { return {}; }, async communityFetchAllParticipating() { return {}; } };
   const store: InstanceDependencies['store'] = {
     async saveMessages(_key, message) { messages.set(message.key.id!, message); },
     async saveManyMessages(_key, rows) { for (const message of rows) messages.set(message.key.id!, message); },
-    async saveManyContacts() {}, async saveManyChats() {}, async deleteByInstance() {}, async deleteChats() {}, async deleteMessages() {},
+    async saveManyContacts(_key, rows) {
+      return rows.map(contact => {
+        const prior = contacts.get(contact.id), row = { jid: contact.id, ...mergeContactNames(prior ? [prior] : [], contact) };
+        contacts.set(contact.id, row); return ContactMapper.event(row, contact);
+      });
+    }, async saveManyChats() {}, async deleteByInstance() {}, async deleteChats() {}, async deleteMessages() {},
     async getMessageById(id) { return messages.get(id); },
   };
   const instance = new Instance({ loadAuth: async () => auth, makeSocket: () => socket, store,
@@ -67,6 +74,7 @@ test('API history and live webhooks keep empty chats and status out of conversat
   });
   await emit('chats.upsert', [{ id: empty, name: 'Contato vazio' }, { id: 'status@broadcast', name: 'status' }]);
   assert.deepEqual((await list()).items, [], 'metadata alone must not appear as a conversation');
+  await emit('contacts.upsert', [{ id: a, name: 'Alice da agenda', notify: 'Nome público antigo' }]);
   await emit('messages.upsert', { type: 'notify', messages: [message('a-latest', a, 200, 'Mais recente A'), message('b-first', b, 100, 'Primeira B')] });
   assert.deepEqual((await list()).items.map((chat: any) => chat.jid), [a, b]);
   await emit('messaging-history.set', {
@@ -77,6 +85,9 @@ test('API history and live webhooks keep empty chats and status out of conversat
   const afterHistory = await list();
   assert.deepEqual(afterHistory.items.map((chat: any) => chat.jid), [a, b]);
   assert.equal(afterHistory.items[0].lastMessage.text, 'Mais recente A');
+  assert.equal(afterHistory.items[0].name, 'Alice da agenda', 'the API contact source survives message/history webhooks');
+  await emit('contacts.update', [{ id: a, notify: 'Novo nome público' }]);
+  assert.equal((await list()).items.find((chat: any) => chat.jid === a).name, 'Alice da agenda');
   assert.equal(afterHistory.items.every((chat: any) => Boolean(chat.lastMessage)), true);
   assert.equal((await f.db.query('SELECT _messageId FROM tbl_status WHERE _instanceId=?', [f.connection.id])).length, 1);
   assert.equal((await f.db.query("SELECT _messageId FROM tbl_messages WHERE _instanceId=? AND _messageId='status-active'", [f.connection.id])).length, 0);

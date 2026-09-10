@@ -204,7 +204,7 @@ test('Prisma page adapter uses ascending instance/id cursors and replays aliases
     ]; } },
   };
   const store = new PrismaRescanStore(db);
-  assert.deepEqual((await store.page('owner/session', 'contacts', 1, 6, 5))[0]!.data, { id: '99@lid', phoneNumber: '5511@s.whatsapp.net', name: 'Contato' });
+  assert.deepEqual((await store.page('owner/session', 'contacts', 1, 6, 5))[0]!.data, { id: '99@lid', phoneNumber: '5511@s.whatsapp.net', legacyName: 'Contato', nameSource: 'legacy' });
   assert.deepEqual((await store.page('owner/session', 'chats', 1, 6, 5))[0]!.data, { id: '99@lid', archived: true });
   const messages = await store.page('owner/session', 'messages', 1, 6, 5);
   assert.deepEqual((messages[0]!.data as any).message.imageMessage.jpegThumbnail, { type: 'Buffer', data: 'AQI=' });

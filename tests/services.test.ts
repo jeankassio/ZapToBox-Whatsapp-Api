@@ -12,6 +12,7 @@ import type { HistoryChunkMetadata } from '../src/shared/types.js';
 import { publicInstanceInfo } from '../src/shared/instance-info.js';
 import Sessions from '../src/infra/state/sessions.js';
 import { groupSpaceRevision } from '../src/infra/baileys/sections-state.js';
+import { ContactMapper, mergeContactNames } from '../src/infra/mappers/contactMapper.js';
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
@@ -73,6 +74,39 @@ async function fixture(t: any, options: { registered?: boolean; overrides?: Part
   return { instance, auth, authRepository, sockets, webhooks, stored, lookups, store, key, owner, flush, start, deleted: () => deletes, pairingRequests: () => pairingRequests };
 }
 
+test('acknowledged contact edits persist and publish canonical names independently of provider echoes', async t => {
+  const f = await fixture(t); await f.start();
+  const id = '5511999999999@s.whatsapp.net';
+  let row: any;
+  f.store.saveManyContacts = async (_key, contacts) => contacts.map(contact => {
+    row = { jid: id, ...mergeContactNames(row ? [row] : [], contact) };
+    return ContactMapper.event(row, contact);
+  });
+  f.sockets[0].ev.emit('contacts.upsert', [{ id, name: 'Novo', notify: 'Perfil' }]);
+  await f.flush();
+  const echoedAt = f.webhooks.find(item => item.event === 'contacts.upsert')!.data[0].savedNameUpdatedAt;
+  const contact = await f.instance.publishContact({ id, name: 'Novo', savedName: 'Novo', savedNameUpdatedAt: echoedAt }, f.sockets[0]);
+  assert.equal(contact.name, 'Novo'); assert.equal(contact.notify, 'Perfil');
+  assert.ok(contact.savedNameUpdatedAt! > echoedAt, 'explicit ACK observation advances past an earlier provider echo');
+  assert.deepEqual(f.webhooks.filter(item => item.event === 'contacts.upsert').at(-1)!.data, [contact]);
+  f.sockets[0].ev.emit('contacts.update', [{ id, notify: 'Perfil novo' }]); await f.flush();
+  assert.equal(row.name, 'Novo'); assert.equal(row.nameMetadata.savedNameUpdatedAt, contact.savedNameUpdatedAt);
+});
+
+test('contact publication rejects old sockets and shutdown drains an accepted contact write', async t => {
+  const f = await fixture(t); await f.start();
+  const write = deferred(), started = deferred(); let calls = 0;
+  f.store.saveManyContacts = async (_key, contacts) => { calls++; started.resolve(); await write.promise; return contacts; };
+  await assert.rejects(f.instance.publishContact({ id: '5511999999999@s.whatsapp.net', name: 'Novo' }, {} as any));
+  assert.equal(calls, 0);
+  const publish = f.instance.publishContact({ id: '5511999999999@s.whatsapp.net', name: 'Novo' }, f.sockets[0]);
+  const rejected = assert.rejects(publish, /connection changed/); await started.promise;
+  let stopped = false; const shutdown = f.instance.shutdown().then(() => { stopped = true; });
+  await tick(); assert.equal(stopped, false);
+  write.resolve(); await rejected; await shutdown;
+  assert.equal(f.webhooks.some(item => item.event === 'contacts.upsert'), false, 'old socket publication cannot leak into a new lifecycle');
+});
+
 test('QR connect polling preserves socket and QR without duplicate events', async t => {
   const f = await fixture(t, { registered: false, initialQR: true });
   const result = await f.start();
@@ -82,6 +116,28 @@ test('QR connect polling preserves socket and QR without duplicate events', asyn
   assert.equal(f.sockets.length, 1);
   assert.equal(f.sockets[0].ended, 0);
   assert.equal(f.webhooks.filter(item => item.event === 'qrcode.updated').length, 1);
+});
+
+test('history names and live profile updates publish the merged saved name with its original observation time', async t => {
+  const f = await fixture(t); await f.start();
+  const contacts = new Map<string, any>();
+  f.store.saveManyContacts = async (_instance, rows) => rows.map(row => {
+    const saved = { jid: row.id, ...mergeContactNames(contacts.has(row.id!) ? [contacts.get(row.id!)] : [], row) };
+    contacts.set(row.id!, saved); return ContactMapper.event(saved, row);
+  });
+  const id = '5511999999999@s.whatsapp.net';
+  f.sockets[0].ev.emit('messaging-history.set', { contacts: [{ id, name: 'Dentista' }], chats: [], messages: [], isLatest: true });
+  await f.flush();
+  const historical = f.webhooks.find(event => event.event === 'contacts.set')!.data[0];
+  assert.equal(historical.savedName, 'Dentista'); assert.ok(Date.parse(historical.savedNameUpdatedAt));
+  f.sockets[0].ev.emit('contacts.update', [{ id, notify: 'Maria', verifiedName: 'Clínica' }]);
+  await f.flush();
+  const live = f.webhooks.find(event => event.event === 'contacts.update')!.data[0];
+  assert.equal(live.name, 'Dentista'); assert.equal(live.notify, 'Maria'); assert.equal(live.savedNameUpdatedAt, historical.savedNameUpdatedAt);
+  f.sockets[0].ev.emit('contacts.update', [{ id, name: '' }]);
+  await f.flush();
+  const removed = f.webhooks.filter(event => event.event === 'contacts.update').at(-1)!.data[0];
+  assert.equal(removed.savedName, null); assert.equal(removed.name, null); assert.ok(removed.savedNameUpdatedAt > historical.savedNameUpdatedAt);
 });
 
 test('community events persist parent and announcement metadata while status and channel messages keep their exact JIDs', async t => {

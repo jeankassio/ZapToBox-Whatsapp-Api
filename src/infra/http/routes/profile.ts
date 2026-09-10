@@ -13,6 +13,7 @@ export default class ProfileRoutes {
     scopedRoute(this.router, 'post', '/fetchBusinessProfile', ({ owner, name, body }) => factory(owner, name).fetchBusinessProfile(jid(body.remoteJid)));
     scopedRoute(this.router, 'post', '/presenceSubscribe', ({ owner, name, body }) => factory(owner, name).presenceSubscribe(jid(body.remoteJid)));
     scopedRoute(this.router, 'patch', '/profileName', ({ owner, name, body }) => factory(owner, name).profileName(text(body.name, 'name', 25)));
+    scopedRoute(this.router, 'patch', '/contactName', ({ owner, name, body }) => factory(owner, name).contactName(jid(body.remoteJid), text(body.name, 'name', 200)));
     scopedRoute(this.router, 'patch', '/profileStatus', ({ owner, name, body }) => factory(owner, name).profileStatus(text(body.status, 'status', 139, true)));
     scopedRoute(this.router, 'put', '/profilePicture', ({ owner, name, body }) => {
       const remoteJid = jid(body.jid ?? body.remoteJid);

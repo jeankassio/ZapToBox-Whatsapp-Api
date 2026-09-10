@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { WAMessage, WAMessageKey } from "@whiskeysockets/baileys";
 import type { Contact } from "../../shared/types.js";
 import { MessageMapper, editTimestampMs, isEditedMessage, sourceEdit } from "../../infra/mappers/messageMapper.js";
-import { ContactMapper } from "../../infra/mappers/contactMapper.js";
+import { ContactMapper, mergeContactNames } from "../../infra/mappers/contactMapper.js";
 import { jsonValue, timestampBigInt } from "../../shared/serialization.js";
 
 export const prisma = new PrismaClient();
@@ -112,7 +112,7 @@ export default class PrismaConnection {
       });
     }
   }
-  static async saveContact(instance: string, contact: Contact & {phoneNumber?:string;notify?:string}): Promise<unknown> {
+  static async saveContact(instance: string, contact: Contact): Promise<Contact | undefined> {
     const id = contact.id;
     const jid = id?.endsWith("@lid") ? contact.phoneNumber : (id ?? contact.phoneNumber);
     const lid = id?.endsWith("@lid") ? id : contact.lid;
@@ -121,16 +121,26 @@ export default class PrismaConnection {
       const rows = await tx.contact.findMany({where:{instance,OR:[...(jid?[{jid}]:[]),...(lid?[{lid}]:[])]}, orderBy:{id:"asc"}});
       const found = rows[0];
       // The oldest row may be an unnamed PN placeholder while the LID row owns the name.
-      const data = {instance,name:contact.name ?? contact.notify ?? rows.find(row=>row.name)?.name ?? null,jid:jid ?? found?.jid ?? null,lid:lid ?? found?.lid ?? null};
+      const names = mergeContactNames(rows, contact);
+      const data = {instance,...names,nameMetadata:jsonValue<Prisma.InputJsonObject>(names.nameMetadata),jid:jid ?? found?.jid ?? null,lid:lid ?? found?.lid ?? null};
       if (found) {
         if (rows.length > 1) await tx.contact.deleteMany({where:{instance,id:{in:rows.slice(1).map(row=>row.id)}}});
-        return tx.contact.update({where:{id:found.id},data});
+        if (found.name === data.name && found.jid === data.jid && found.lid === data.lid && isDeepStrictEqual(found.nameMetadata, data.nameMetadata)) return ContactMapper.event(found, contact);
+        return ContactMapper.event(await tx.contact.update({where:{id:found.id},data}), contact);
       }
-      return tx.contact.create({data});
+      return ContactMapper.event(await tx.contact.create({data}), contact);
     }));
   }
-  static async saveManyContacts(instance: string, contacts: Contact[]): Promise<void> {
-    for (const contact of contacts) await this.saveContact(instance,contact);
+  static async saveManyContacts(instance: string, contacts: Contact[]): Promise<Contact[]> {
+    const result: Contact[] = [];
+    // Adjacent identical replays share a write without changing event order or counts.
+    let previous: Contact | undefined, saved: Contact | undefined;
+    for (const contact of contacts) {
+      if (!previous || !isDeepStrictEqual(previous, contact)) saved = await this.saveContact(instance,contact);
+      previous = contact;
+      if (saved) result.push(saved);
+    }
+    return result;
   }
   static async deleteByInstance(instance: string): Promise<Prisma.BatchPayload> {
     return serialized(instance, () => prisma.$transaction(async tx => {

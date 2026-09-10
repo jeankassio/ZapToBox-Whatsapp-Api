@@ -54,6 +54,8 @@ Crie uma conexão pelo frontend ou por `POST /instances/create`, conforme a [doc
 
 Signal keys, histórico e contatos são persistidos por instância. Reiniciar e reconectar preservam histórico. Webhooks usam gravação atômica, retries e dead-letter; veja [eventos, payloads e operação da fila](docs/webhooks.md).
 
+Os [contratos de nomes, leitura e mídia sob demanda](docs/contact-names-and-demand.md) preservam a prioridade dos nomes salvos no celular, a origem das alterações e os timestamps durante reimportações. A atualização exige a migration de metadata dos contatos.
+
 A [recuperação de conexão](docs/connection-recovery.md) preserva sessões válidas e repete quedas sem depender do painel. Há supervisão compartilhada para transportes fechados sem notificação e autenticações travadas, espera maior para conflitos/recusas e retenção de gravações Signal pendentes durante falhas temporárias do armazenamento. Logout confirmado encerra as tentativas. Publique também o backend e as interfaces atualizadas para manter o status consistente.
 
 O [progresso de sincronização](docs/history-sync.md) identifica recebimento e importação de lotes, preservando contagens e reentregas. O percentual informado pelo WhatsApp pertence à etapa atual; não representa todo o histórico nem o download das mídias.

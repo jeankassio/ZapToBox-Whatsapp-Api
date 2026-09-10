@@ -264,6 +264,30 @@ test('profile pictures have a finite lookup deadline and absent/private photos a
   }
 });
 
+test('profile picture refresh queries the provider again and rejects a late result from a disconnected socket', async () => {
+  let calls = 0;
+  const socket = { ws: { isOpen: true }, profilePictureUrl: async () => { calls++; return calls === 1 ? 'https://example.com/old.jpg' : null; } };
+  const controller = new ProfileController('owner', 'pictures', { socket: socket as unknown as WASocket });
+  assert.equal((await controller.fetchProfilePicture(jid)).data.status, 'https://example.com/old.jpg');
+  assert.equal((await controller.fetchProfilePicture(jid)).data.status, null); assert.equal(calls, 2);
+  socket.profilePictureUrl = async () => { socket.ws.isOpen = false; return 'https://example.com/late.jpg'; };
+  const late = await controller.fetchProfilePicture(jid);
+  assert.equal(late.success, false); assert.equal(late.statusCode, 409);
+});
+
+test('batched read receipts validate the entire instance/chat scope, deduplicate and skip outgoing messages', async () => {
+  const receipts: any[] = [], lookups: unknown[][] = [];
+  const repo = repository();
+  repo.getMessageById = async (id, instance, remoteJid) => { lookups.push([id, instance, remoteJid]); return id === 'foreign' ? undefined : message(id, id === 'sent'); };
+  const socket = { readMessages: async (keys: any[]) => { receipts.push(keys); } } as unknown as WASocket;
+  const controller = new MessagesController('owner', 'read-scope', jid, 0, { socket, repository: repo });
+  await assert.rejects(controller.readMessages(['incoming', 'foreign']), (error: any) => error.statusCode === 404);
+  assert.equal(receipts.length, 0);
+  assert.equal((await controller.readMessages(['incoming', 'incoming', 'sent'])).success, true);
+  assert.deepEqual(receipts[0].map((key: any) => key.id), ['incoming']);
+  assert.ok(lookups.every(([, instance, remoteJid]) => instance === 'owner/read-scope' && remoteJid === jid));
+});
+
 test('presence updates are awaited and failures do not expose provider errors', async () => {
   const socket = { sendPresenceUpdate: async () => { throw new Error('private-provider-token'); } } as unknown as WASocket;
   const result = await new ChatController('owner', 'session', { socket }).sendPresence('available');

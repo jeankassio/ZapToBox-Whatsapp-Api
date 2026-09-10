@@ -12,13 +12,14 @@ import { baileysEvents, instanceConnection, instances, instanceStatus, sessionsP
 import { instanceKey } from '../../shared/identity.js';
 import { publicInstanceInfo, updateConnectionStatus } from '../../shared/instance-info.js';
 import { genProxy, removeInstancePath, trySendWebhook } from '../../shared/utils.js';
-import type { ConnectionState, ConnectionStatus, HistoryChunkMetadata, InstanceData, InstanceInfo } from '../../shared/types.js';
+import type { ConnectionState, ConnectionStatus, Contact, HistoryChunkMetadata, InstanceData, InstanceInfo } from '../../shared/types.js';
 import UserConfig from '../config/env.js';
 import PrismaConnection from '../../core/connection/prisma.js';
 import { loadInstanceAuth, safeSessionDirectory, type PersistentAuth } from '../state/auth-state.js';
 import { messageTimestamp, serializeBaileys, sourceEdit } from '../mappers/messageMapper.js';
 import { groupSpaceRecord, isCompleteGroupMetadata } from '../mappers/spaces.js';
 import { noteGroupSpaceChanges } from './sections-state.js';
+import { observeContact } from '../mappers/contactMapper.js';
 import { HistoryProgressTracker } from './history-progress.js';
 import { webhookChunks, WEBHOOK_CHUNK_ITEMS } from '../webhook/chunks.js';
 import { RequestError } from '../http/controllers/base.js';
@@ -31,7 +32,9 @@ export interface InstanceDependencies {
   makeSocket: (config: SocketConfig) => WASocket;
   loadAuth: (owner: string, name: string) => Promise<PersistentAuth>;
   emit: typeof trySendWebhook;
-  store: Pick<typeof PrismaConnection, 'saveMessages' | 'saveManyMessages' | 'saveManyContacts' | 'getMessageById' | 'deleteByInstance' | 'saveManyChats' | 'deleteChats' | 'deleteMessages'>;
+  store: Pick<typeof PrismaConnection, 'saveMessages' | 'saveManyMessages' | 'getMessageById' | 'deleteByInstance' | 'saveManyChats' | 'deleteChats' | 'deleteMessages'> & {
+    saveManyContacts: (instance: string, contacts: Contact[]) => Promise<Contact[] | void>;
+  };
   reconnectDelayMs: number;
   reconnectMaxDelayMs: number;
   conflictRetryDelayMs: number;
@@ -78,6 +81,7 @@ export default class Instance {
   private msgRetryCounterCache = new BoundedCache(2048, 3600);
   private userDevicesCache = new BoundedCache(1024, 300);
   private groupCache = new BoundedCache(128, 300);
+  private contactObservedAt = 0;
 
   constructor(dependencies: Partial<InstanceDependencies> = {}) {
     this.dependencies = {
@@ -309,6 +313,13 @@ export default class Instance {
     const closeReason = (update: BaileysEventMap['connection.update']) => (update.lastDisconnect?.error as { output?: { statusCode?: number } } | undefined)?.output?.statusCode;
     const on = <K extends keyof BaileysEventMap>(event: K, handler: (data: BaileysEventMap[K]) => Promise<void>) => {
       sock.ev.on(event, data => {
+        if (event === 'contacts.upsert' || event === 'contacts.update' || event === 'messaging-history.set') {
+          const observedAt = new Date(this.contactObservedAt = Math.max(Date.now(), this.contactObservedAt + 1)).toISOString();
+          if (event === 'messaging-history.set') {
+            const batch = data as BaileysEventMap['messaging-history.set'];
+            data = { ...batch, contacts: batch.contacts.map(contact => observeContact(contact, observedAt)) } as BaileysEventMap[K];
+          } else data = (data as Contact[]).map(contact => observeContact(contact, observedAt)) as BaileysEventMap[K];
+        }
         if ((event === 'groups.upsert' || event === 'groups.update') && !socketClosed && !this.stopped && generation === this.generation) {
           const groups = data as BaileysEventMap['groups.update'];
           noteGroupSpaceChanges(sock, this.key, groups.filter((group): group is typeof group & { id: string } => Boolean(group.id))
@@ -409,9 +420,9 @@ export default class Instance {
       await emit('messaging-history.progress', history.snapshot('importing'));
       for (const [index, chunk] of plans.contacts.entries()) {
         if (!connected()) return;
-        await this.dependencies.store.saveManyContacts(this.key, chunk as typeof contacts);
+        const saved = await this.dependencies.store.saveManyContacts(this.key, chunk as Contact[]);
         if (!connected()) return;
-        await emit('contacts.set', chunk, metadata('contacts.set', index));
+        await emit('contacts.set', saved ?? chunk, metadata('contacts.set', index));
       }
       for (const [index, chunk] of plans.chats.entries()) {
         if (!connected()) return;
@@ -484,8 +495,8 @@ export default class Instance {
     on('chats.upsert', async data => { await this.dependencies.store.saveManyChats(this.key, data as any); await emit('chats.upsert', data); });
     on('chats.update', async data => { await this.dependencies.store.saveManyChats(this.key, data as any); await emit('chats.update', data); });
     on('chats.delete', async data => { await this.dependencies.store.deleteChats(this.key, data); await emit('chats.delete', data); });
-    on('contacts.upsert', async data => { await this.dependencies.store.saveManyContacts(this.key, data); await emit('contacts.upsert', data); });
-    on('contacts.update', async data => { await this.dependencies.store.saveManyContacts(this.key, data); await emit('contacts.update', data); });
+    on('contacts.upsert', async data => { const saved = await this.dependencies.store.saveManyContacts(this.key, data); await emit('contacts.upsert', saved ?? data); });
+    on('contacts.update', async data => { const saved = await this.dependencies.store.saveManyContacts(this.key, data); await emit('contacts.update', saved ?? data); });
     on('lid-mapping.update', async data => {
       // Baileys has already persisted forward/reverse Signal mappings via keys.set.
       await this.dependencies.store.saveManyContacts(this.key, [{ id: data.lid, phoneNumber: data.pn }]);
@@ -647,5 +658,21 @@ export default class Instance {
     if (!this.key || this.stopped) throw new Error('Instance is not connected');
     await this.dependencies.store.saveMessages(this.key, sentMessage);
     await this.emit('send.message', this.webhookMessages([sentMessage]));
+  }
+
+  /** Persist an acknowledged address-book edit even when emitOwnEvents is off. */
+  async publishContact(contact: Contact, expectedSocket: WASocket): Promise<Contact> {
+    const generation = this.generation;
+    const active = () => Boolean(this.key && !this.stopped && this.sock === expectedSocket && generation === this.generation);
+    if (!active()) throw new Error('Instance connection changed');
+    const observedAt = new Date(this.contactObservedAt = Math.max(Date.now(), this.contactObservedAt + 1)).toISOString();
+    const observed = observeContact({ ...contact, savedNameUpdatedAt: observedAt }, observedAt);
+    return this.trackOperation(async () => {
+      const saved = await this.dependencies.store.saveManyContacts(this.key, [observed]);
+      if (!active()) throw new Error('Instance connection changed');
+      const canonical = saved?.[0] ?? observed;
+      await this.emit('contacts.upsert', [canonical], generation);
+      return canonical;
+    });
   }
 }

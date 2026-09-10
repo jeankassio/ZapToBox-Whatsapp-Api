@@ -59,7 +59,13 @@ export interface ProxyAgent{
 
 export interface Contact{
   id?: string;
-  name?: string;
+  name?: string | null;
+  savedName?: string | null;
+  savedNameUpdatedAt?: string;
+  notify?: string | null;
+  verifiedName?: string | null;
+  legacyName?: string | null;
+  nameSource?: 'saved' | 'notify' | 'verified' | 'legacy';
   lid?: string;
   phoneNumber?: string;
 }

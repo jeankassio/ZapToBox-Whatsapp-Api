@@ -30,6 +30,7 @@ model Contact {
   id         Int     @id @default(autoincrement())
   instance   String
   name       String?
+  nameMetadata Json?
   jid        String?
   lid        String?
 
