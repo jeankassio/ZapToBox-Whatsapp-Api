@@ -6,6 +6,8 @@ import { RequestError } from "../controllers/base.js";
 import { connectionTimestamp } from '../../../shared/instance-info.js';
 import { historyRescan } from '../../history-rescan/index.js';
 import type { HistoryRescanService } from '../../history-rescan/service.js';
+import SectionsController from '../controllers/sections.js';
+import { scopedRoute } from './helpers.js';
 
 const identity=(value:unknown,label:string) => {
   try {return validateIdentity(typeof value==='number' && Number.isSafeInteger(value) ? String(value) : value,label);}
@@ -26,9 +28,11 @@ const handle=(action:(req:Request)=>Promise<unknown>,status=200)=>async(req:Requ
   }
 };
 export default class InstanceRoutes {
-  constructor(private readonly history: Pick<HistoryRescanService, 'request' | 'status'> = historyRescan) {}
+  constructor(private readonly history: Pick<HistoryRescanService, 'request' | 'status'> = historyRescan,
+    private readonly sections = (owner: string, name: string) => new SectionsController(owner, name)) {}
   get() {
     const router=Router();const controller=new InstancesController();
+    scopedRoute(router, 'get', '/sections', ({ owner, name }) => this.sections(owner, name).getSections());
     router.post('/create',handle(async req=>{
       idempotencyKey(req);
       const owner=identity(req.body?.owner,'owner'),name=identity(req.body?.instanceName,'instanceName');

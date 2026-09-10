@@ -2,6 +2,7 @@ import { downloadMediaMessage, normalizeMessageContent, getContentType, getUrlFr
 import { SocketController, RequestError, type ControllerDependencies, type ControllerResult } from './base.js';
 import { reuploadHistoricalMedia } from '../../baileys/media-reupload.js';
 import { collectMedia, mediaDownloadBudget, untilAborted, trackMediaDownload } from './media-budget.js';
+import { messageTimestamp } from '../../mappers/messageMapper.js';
 
 type MediaDependencies = ControllerDependencies & { download?: typeof downloadMediaMessage; reupload?: typeof reuploadHistoricalMedia };
 
@@ -14,13 +15,18 @@ export default class MediaController extends SocketController {
   private readonly download: typeof downloadMediaMessage;
   private readonly reupload: typeof reuploadHistoricalMedia;
   constructor(owner: string, instanceName: string, dependencies: MediaDependencies = {}) { super(owner, instanceName, dependencies); this.download = dependencies.download ?? downloadMediaMessage; this.reupload = dependencies.reupload ?? reuploadHistoricalMedia; }
-  async getMedia(messageId: string, isBase64 = false): Promise<ControllerResult> {
+  async getMedia(messageId: string, isBase64 = false, remoteJid?: string): Promise<ControllerResult> {
     const result = await this.perform('Media downloaded.', async sock => mediaDownloadBudget.run(async () => {
       const abort = new AbortController();
       const releaseTracking = trackMediaDownload(this.instance, abort);
       const timer = setTimeout(() => abort.abort(), 45_000);
       try {
-      const original = await this.stored(messageId);
+      const original = await this.stored(messageId, remoteJid);
+      if (remoteJid && original.key.remoteJid !== remoteJid) throw new RequestError(404, 'Message not found in the requested chat.');
+      if (original.key.remoteJid === 'status@broadcast') {
+        const timestamp = messageTimestamp(original.messageTimestamp) * 1000;
+        if (!timestamp || timestamp > Date.now() + 60_000 || Date.now() >= timestamp + 86_400_000) throw new RequestError(410, 'WhatsApp status has expired.');
+      }
       const content = normalizeMessageContent(original.message);
       const type = content ? getContentType(content) : undefined;
       if (!type || !['imageMessage', 'videoMessage', 'audioMessage', 'documentMessage', 'stickerMessage'].includes(type)) throw new RequestError(400, 'Message is not downloadable media.');

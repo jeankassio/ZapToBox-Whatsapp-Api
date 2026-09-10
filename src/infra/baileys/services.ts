@@ -17,6 +17,8 @@ import UserConfig from '../config/env.js';
 import PrismaConnection from '../../core/connection/prisma.js';
 import { loadInstanceAuth, safeSessionDirectory, type PersistentAuth } from '../state/auth-state.js';
 import { messageTimestamp, serializeBaileys, sourceEdit } from '../mappers/messageMapper.js';
+import { groupSpaceRecord, isCompleteGroupMetadata } from '../mappers/spaces.js';
+import { noteGroupSpaceChanges } from './sections-state.js';
 import { HistoryProgressTracker } from './history-progress.js';
 import { webhookChunks, WEBHOOK_CHUNK_ITEMS } from '../webhook/chunks.js';
 import { RequestError } from '../http/controllers/base.js';
@@ -307,6 +309,11 @@ export default class Instance {
     const closeReason = (update: BaileysEventMap['connection.update']) => (update.lastDisconnect?.error as { output?: { statusCode?: number } } | undefined)?.output?.statusCode;
     const on = <K extends keyof BaileysEventMap>(event: K, handler: (data: BaileysEventMap[K]) => Promise<void>) => {
       sock.ev.on(event, data => {
+        if ((event === 'groups.upsert' || event === 'groups.update') && !socketClosed && !this.stopped && generation === this.generation) {
+          const groups = data as BaileysEventMap['groups.update'];
+          noteGroupSpaceChanges(sock, this.key, groups.filter((group): group is typeof group & { id: string } => Boolean(group.id))
+            .map(group => groupSpaceRecord(group, event === 'groups.upsert' || isCompleteGroupMetadata(group))));
+        }
         // Lifecycle and auth persistence cannot wait behind history imports.
         if (event === 'creds.update') {
           if (!socketClosed && !this.stopped && generation === this.generation) {
@@ -484,8 +491,8 @@ export default class Instance {
       await this.dependencies.store.saveManyContacts(this.key, [{ id: data.lid, phoneNumber: data.pn }]);
       await emit('lid-mapping.update', data);
     });
-    on('groups.upsert', async data => { for (const group of data) this.groupCache.set(group.id, group); await emit('groups.upsert', data); });
-    on('groups.update', async data => { for (const group of data) if (group.id) this.groupCache.del(group.id); await emit('groups.update', data); });
+    on('groups.upsert', async data => { for (const group of data) this.groupCache.set(group.id, group); const rows = data.map(group => groupSpaceRecord(group, true)); await this.dependencies.store.saveManyChats(this.key, rows); await emit('groups.upsert', data.map((group, index) => ({ ...group, ...rows[index] }))); });
+    on('groups.update', async data => { for (const group of data) if (group.id) this.groupCache.del(group.id); const valid = data.filter((group): group is typeof group & { id: string } => Boolean(group.id)); const rows = valid.map(group => groupSpaceRecord(group, isCompleteGroupMetadata(group))); await this.dependencies.store.saveManyChats(this.key, rows); await emit('groups.update', valid.map((group, index) => ({ ...group, ...rows[index] }))); });
     on('group-participants.update', async data => { this.groupCache.del(data.id); await emit('group-participants.update', data); });
     const passthrough = ['presence.update', 'messages.reaction', 'message-receipt.update', 'group.join-request', 'blocklist.set', 'blocklist.update', 'call', 'labels.edit', 'labels.association', 'newsletter.reaction', 'newsletter.view', 'newsletter-participants.update', 'newsletter-settings.update'] as const;
     for (const event of passthrough) on(event, data => emit(event, data));

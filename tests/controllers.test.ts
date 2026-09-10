@@ -306,6 +306,23 @@ test('download media is scoped and unwraps view-once content without a live sock
   assert.equal(result.base64, 'data:image/png;base64,ZXhhbXBsZQ==');
 });
 
+test('status media requires the exact status chat and rejects expired publications before download', async () => {
+  const repo = repository(), socket = { logger: {} } as unknown as WASocket;
+  let downloads = 0, remoteJid = 'status@broadcast', timestamp = Math.floor(Date.now() / 1000);
+  repo.getMessageById = async (_id, instance, expectedJid) => {
+    assert.equal(instance, 'owner/session'); assert.equal(expectedJid, 'status@broadcast');
+    return { key: { id: 'status-one', remoteJid }, messageTimestamp: timestamp, message: { imageMessage: { mimetype: 'image/png' } } };
+  };
+  const download = (async () => { downloads++; return Buffer.from('status-image'); }) as typeof downloadMediaMessage;
+  const controller = new MediaController('owner', 'session', { socket, repository: repo, download });
+  assert.equal((await controller.getMedia('status-one', true, 'status@broadcast')).success, true);
+  timestamp -= 86_401;
+  assert.equal((await controller.getMedia('status-one', true, 'status@broadcast')).statusCode, 410);
+  timestamp = Math.floor(Date.now() / 1000); remoteJid = jid;
+  assert.equal((await controller.getMedia('status-one', true, 'status@broadcast')).statusCode, 404);
+  assert.equal(downloads, 1);
+});
+
 test('guards reject malformed message primitives and private media hosts without making a request', async () => {
   assert.equal(normalizeJid('+5511999999999'), jid);
   assert.equal(normalizeJid({}), undefined);

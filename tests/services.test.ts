@@ -11,6 +11,7 @@ import { deserializeBaileys } from '../src/infra/mappers/messageMapper.js';
 import type { HistoryChunkMetadata } from '../src/shared/types.js';
 import { publicInstanceInfo } from '../src/shared/instance-info.js';
 import Sessions from '../src/infra/state/sessions.js';
+import { groupSpaceRevision } from '../src/infra/baileys/sections-state.js';
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
@@ -81,6 +82,37 @@ test('QR connect polling preserves socket and QR without duplicate events', asyn
   assert.equal(f.sockets.length, 1);
   assert.equal(f.sockets[0].ended, 0);
   assert.equal(f.webhooks.filter(item => item.event === 'qrcode.updated').length, 1);
+});
+
+test('community events persist parent and announcement metadata while status and channel messages keep their exact JIDs', async t => {
+  const f = await fixture(t); await f.start();
+  const chats: any[] = [];
+  f.store.saveManyChats = async (_instance, records) => { chats.push(...records); };
+  f.sockets[0].ev.emit('groups.upsert', [{ id: '120363123450000@g.us', subject: 'Community', isCommunity: true, participants: [] }]);
+  f.sockets[0].ev.emit('groups.update', [{ id: '120363123450001@g.us', subject: 'Announcements', linkedParent: '120363123450000@g.us', isCommunityAnnounce: true }]);
+  for (const [id, remoteJid] of [['status-message', 'status@broadcast'], ['channel-message', '120363123456789@newsletter']]) {
+    f.sockets[0].ev.emit('messages.upsert', { type: 'notify', messages: [{ key: { id, remoteJid, participant: '5511999999999@s.whatsapp.net' }, message: { conversation: 'Real provider content' }, messageTimestamp: Math.floor(Date.now() / 1000) }] });
+  }
+  await f.flush();
+  assert.equal(chats[0].isCommunity, true); assert.equal(chats[1].linkedParent, chats[0].id); assert.equal(chats[1].isCommunityAnnounce, true);
+  assert.equal(f.stored.get(`${f.key}/status-message`)?.key.remoteJid, 'status@broadcast');
+  assert.equal(f.stored.get(`${f.key}/channel-message`)?.key.remoteJid, '120363123456789@newsletter');
+  assert.equal(f.webhooks.find(row => row.event === 'groups.update')?.data[0].isCommunityAnnounce, true);
+});
+
+test('full group events clear membership but a partial rename preserves omitted metadata', async t => {
+  const f = await fixture(t); await f.start(); const chats: any[] = [];
+  f.store.saveManyChats = async (_instance, records) => { chats.push(...records); };
+  const id = '120363123450001@g.us';
+  f.sockets[0].ev.emit('groups.update', [{ id, subject: 'Renamed' }]);
+  assert.equal(groupSpaceRevision(f.sockets[0], f.key), 1);
+  await f.flush();
+  assert.equal(Object.hasOwn(chats[0], 'linkedParent'), false);
+  assert.equal(Object.hasOwn(f.webhooks.find(row => row.event === 'groups.update')!.data[0], 'linkedParent'), false);
+  f.sockets[0].ev.emit('groups.update', [{ id, subject: 'Unlinked', participants: [], isCommunity: false, isCommunityAnnounce: false, announce: false, linkedParent: undefined }]);
+  await f.flush();
+  assert.equal(chats[1].linkedParent, null); assert.equal(chats[1].isCommunity, false);
+  assert.equal(f.webhooks.filter(row => row.event === 'groups.update').at(-1)!.data[0].linkedParent, null);
 });
 
 test('pairing code is requested once; QR limit stops networking without deleting history', async t => {
