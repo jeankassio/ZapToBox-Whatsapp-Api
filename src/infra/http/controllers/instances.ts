@@ -7,6 +7,7 @@ import { publicInstanceInfo } from "../../../shared/instance-info.js";
 import { loadInstanceAuth, safeSessionDirectory } from "../../state/auth-state.js";
 import { removeInstancePath, trySendWebhook } from "../../../shared/utils.js";
 import { RequestError } from "./base.js";
+import { hasLinkedCredentials } from "../../../shared/auth-credentials.js";
 
 const lifecycle = new Map<string,Promise<unknown>>();
 async function exclusive<T>(key:string,action:()=>Promise<T>):Promise<T> {
@@ -73,7 +74,7 @@ export default class InstancesController {
       const existing=await this.find(owner,instanceName);
       if(!existing) throw new RequestError(404,'Instance not found.');
       const auth=await loadInstanceAuth(owner,instanceName);
-      if(auth.state.creds.registered) throw new RequestError(409,'Instance not connected.');
+      if(hasLinkedCredentials(auth.state.creds)) throw new RequestError(409,'Instance not connected.');
       return {success:true,instance:{owner,instanceName,connectionStatus:'REMOVED',instanceJid:null}};
     });
   }

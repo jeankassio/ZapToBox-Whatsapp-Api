@@ -3,12 +3,13 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, rm, symlink } from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
-import { initAuthCreds, BufferJSON } from '@whiskeysockets/baileys';
+import { initAuthCreds, BufferJSON, configureSuccessfulPairing, encodeSignedDeviceIdentity, Curve, hmacSign, proto, WA_ADV_ACCOUNT_SIG_PREFIX } from '@whiskeysockets/baileys';
 import { createPersistentAuth, filesystemAuthRepository, safeSessionDirectory, type AuthEntry, type AuthRepository } from '../src/infra/state/auth-state.js';
 import { serializeBaileys, deserializeBaileys, MessageMapper } from '../src/infra/mappers/messageMapper.js';
 import { ContactMapper } from '../src/infra/mappers/contactMapper.js';
 import { instanceKey } from '../src/shared/identity.js';
 import { ambiguousLegacyKeys, discoverFileSessions } from '../src/infra/state/sessions.js';
+import { hasLinkedCredentials } from '../src/shared/auth-credentials.js';
 
 export function memoryAuthRepository(): AuthRepository & { entries: Map<string, AuthEntry> } {
   const entries = new Map<string, AuthEntry>();
@@ -30,6 +31,67 @@ async function fixture(t: any): Promise<string> {
   });
   return directory;
 }
+
+/** An authentic provider pair-success calculation using only generated local keys. */
+function successfulQrCredentials() {
+  const creds = initAuthCreds(), accountKey = Curve.generateKeyPair();
+  const details = proto.ADVDeviceIdentity.encode({ rawId: 123, timestamp: 1_700_000_000, keyIndex: 1 }).finish();
+  const accountSignature = Curve.sign(accountKey.private, Buffer.concat([WA_ADV_ACCOUNT_SIG_PREFIX, details, creds.signedIdentityKey.public]));
+  const account = proto.ADVSignedDeviceIdentity.encode({ details, accountSignatureKey: accountKey.public, accountSignature }).finish();
+  const identity = proto.ADVSignedDeviceIdentityHMAC.encode({ details: account, hmac: hmacSign(account, Buffer.from(creds.advSecretKey, 'base64')) }).finish();
+  const update = configureSuccessfulPairing({ tag: 'iq', attrs: { id: 'local-pair-success' }, content: [{ tag: 'pair-success', attrs: {}, content: [
+    { tag: 'device-identity', attrs: {}, content: identity },
+    { tag: 'device', attrs: { jid: '5511999999999:7@s.whatsapp.net', lid: '123456789012345@lid' } },
+    { tag: 'platform', attrs: { name: 'android' } },
+  ] }] }, creds).creds;
+  assert.equal(Object.hasOwn(update, 'registered'), false, 'QR pairing does not update the registered flag in Baileys rc14');
+  return Object.assign(creds, update);
+}
+
+test('real QR pairing credentials remain linked after memory persistence with registered false', async () => {
+  const repo = memoryAuthRepository(), auth = await createPersistentAuth(repo);
+  const paired = successfulQrCredentials();
+  Object.assign(auth.state.creds, paired); await auth.saveCreds();
+  const restarted = await createPersistentAuth(repo);
+  assert.equal(restarted.state.creds.registered, false);
+  assert.equal(restarted.state.creds.me?.id, paired.me?.id);
+  assert.deepEqual(encodeSignedDeviceIdentity(restarted.state.creds.account!, true), encodeSignedDeviceIdentity(paired.account!, true));
+  assert.equal(hasLinkedCredentials(restarted.state.creds), true);
+  await restarted.reset();
+  const removed = await createPersistentAuth(repo);
+  assert.equal(hasLinkedCredentials(removed.state.creds), false);
+  assert.equal(removed.state.creds.me, undefined); assert.equal(removed.state.creds.account, undefined);
+});
+
+test('filesystem restart restores QR linkage and reset cannot reimport its previous legacy credentials', async t => {
+  const root = await fixture(t), directory = await safeSessionDirectory(root, 'owner', 'qr', true);
+  const paired = successfulQrCredentials();
+  await writeFile(path.join(directory, 'creds.json'), JSON.stringify(paired, BufferJSON.replacer));
+  const auth = await createPersistentAuth(await filesystemAuthRepository(directory), directory);
+  const signalKey = Buffer.from([1, 2, 3, 4]);
+  await auth.state.keys.set({ session: { peer: signalKey } }); await auth.saveCreds(); await auth.drain();
+  const restarted = await createPersistentAuth(await filesystemAuthRepository(directory), directory);
+  assert.equal(restarted.state.creds.registered, false); assert.equal(hasLinkedCredentials(restarted.state.creds), true);
+  assert.deepEqual(encodeSignedDeviceIdentity(restarted.state.creds.account!, true), encodeSignedDeviceIdentity(paired.account!, true));
+  assert.deepEqual((await restarted.state.keys.get('session', ['peer'])).peer, signalKey);
+  await restarted.reset(); await restarted.drain();
+  const removed = await createPersistentAuth(await filesystemAuthRepository(directory), directory);
+  assert.equal(hasLinkedCredentials(removed.state.creds), false);
+  assert.equal(removed.state.creds.me, undefined); assert.equal((await removed.state.keys.get('session', ['peer'])).peer, undefined);
+  assert.equal(JSON.parse(await readFile(path.join(directory, 'creds.json'), 'utf8')).me.id, paired.me?.id, 'reset retains but never reimports the original QR file');
+});
+
+test('a phone-code request persisted before confirmation is not mistaken for a linked session', async t => {
+  const root = await fixture(t), directory = await safeSessionDirectory(root, 'owner', 'pending-code', true);
+  const auth = await createPersistentAuth(await filesystemAuthRepository(directory), directory);
+  // requestPairingCode sets these fields and emits creds.update before the phone accepts.
+  auth.state.creds.me = { id: '5511999999999@s.whatsapp.net', name: '~' };
+  auth.state.creds.pairingCode = '12345678';
+  await auth.saveCreds();
+  const restarted = await createPersistentAuth(await filesystemAuthRepository(directory), directory);
+  assert.ok(restarted.state.creds.me?.id); assert.equal(restarted.state.creds.account, undefined);
+  assert.equal(restarted.state.creds.registered, false); assert.equal(hasLinkedCredentials(restarted.state.creds), false);
+});
 
 test('Signal categories survive restart and null deletes; serialization is idempotent', async () => {
   const repo = memoryAuthRepository();

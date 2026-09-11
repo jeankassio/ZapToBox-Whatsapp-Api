@@ -6,7 +6,8 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import express from 'express';
 import Instance, { type InstanceDependencies } from '../src/infra/baileys/services.js';
-import { createPersistentAuth, type AuthEntry } from '../src/infra/state/auth-state.js';
+import { createPersistentAuth, type AuthEntry, type AuthRepository } from '../src/infra/state/auth-state.js';
+import Sessions from '../src/infra/state/sessions.js';
 import { createApp } from '../src/app.js';
 import { publicInstanceInfo } from '../src/shared/instance-info.js';
 import { instances, instanceConnection, instanceStatus } from '../src/shared/constants.js';
@@ -124,5 +125,102 @@ test('API lifecycle and HTTP observations converge on the backend after recovery
     await Promise.all([new Promise<void>(done => api.close(() => done())), new Promise<void>(done => back.close(() => done()))]);
     await db.close();
     if (previousSecret === undefined) delete process.env.WEBHOOK_SECRET; else process.env.WEBHOOK_SECRET = previousSecret;
+  }
+});
+
+test('startup restores a QR-linked device with registered=false and updates the backend without manual connect', {
+  skip: !process.env.QA_BACKEND_PATH,
+}, async t => {
+  const load = (file: string) => import(pathToFileURL(join(resolve(process.env.QA_BACKEND_PATH!), 'dist', `${file}.js`)).href);
+  const [{ SqliteDatabase }, { migrate }, { createWebhookRouter }, { WhatsappClient }, { ConnectionStatusService }, { connectionDto }, { errorHandler }] = await Promise.all([
+    load('db'), load('migrate'), load('whatsapp/webhook'), load('whatsapp/client'), load('connection-status'), load('connections'), load('errors'),
+  ]);
+  const secret = `qa-${randomUUID()}`, previousSecret = process.env.WEBHOOK_SECRET;
+  process.env.WEBHOOK_SECRET = secret;
+  t.after(() => { if (previousSecret === undefined) delete process.env.WEBHOOK_SECRET; else process.env.WEBHOOK_SECRET = previousSecret; });
+  const name = `qa_restart_${randomUUID().replaceAll('-', '')}`, key = `1/${name}`, jid = '5511999999999@s.whatsapp.net';
+  const db = new SqliteDatabase();
+  t.after(() => db.close());
+  await migrate(db);
+  await db.execute("INSERT INTO tbl_instances (_id,_user,_identify,_name,_label,_status,_owner,_expire,_created) VALUES (1,1,'qa-qr-restart',?,'QA','1',?,'2099-01-01 00:00:00','2026-01-01 00:00:00')", [name, jid]);
+
+  // Only durable credentials survive the simulated process restart. QR pairing
+  // supplies me + account, while registered remains false in Baileys rc14.
+  const rows = new Map<string, AuthEntry>();
+  const repository: AuthRepository = {
+    async read(type, ids) { return Object.fromEntries(ids.flatMap(id => { const row = rows.get(`${type}:${id}`); return row ? [[id, structuredClone(row.value)]] : []; })); },
+    async write(entries) { for (const entry of entries) { if (entry.value === null) rows.delete(`${entry.type}:${entry.key}`); else rows.set(`${entry.type}:${entry.key}`, structuredClone(entry)); } },
+    async clear() { rows.clear(); },
+    async replace(entries) { rows.clear(); await this.write(entries); },
+  };
+  const previousAuth = await createPersistentAuth(repository);
+  previousAuth.state.creds.registered = false;
+  previousAuth.state.creds.me = { id: '5511999999999:7@s.whatsapp.net', name: 'QR-linked device' };
+  previousAuth.state.creds.account = { details: Buffer.from([1]) };
+  await previousAuth.saveCreds(); await previousAuth.drain();
+  assert.equal(instances[key], undefined);
+
+  let ready = false, connectRequests = 0;
+  const apiApp = express();
+  apiApp.use((req, _res, next) => { if (req.path.startsWith('/instances/connect/')) connectRequests++; next(); });
+  apiApp.use(createApp({ token: secret, ready: async () => {}, isReady: () => ready }));
+  const api = apiApp.listen(0, '127.0.0.1'); await once(api, 'listening');
+  const provider = new WhatsappClient({ baseUrl: `http://127.0.0.1:${(api.address() as { port: number }).port}`, token: secret });
+  const statuses = new ConnectionStatusService(db, provider);
+  const backApp = express(); backApp.use(express.json()); backApp.use('/webhook', createWebhookRouter(db, () => {}, provider, false, statuses)); backApp.use(errorHandler);
+  const back = backApp.listen(0, '127.0.0.1'); await once(back, 'listening');
+  const webhookUrl = `http://127.0.0.1:${(back.address() as { port: number }).port}/webhook`;
+  const payloads: any[] = [], sockets: any[] = [];
+  const store: InstanceDependencies['store'] = {
+    async saveMessages() {}, async saveManyMessages() {}, async saveManyContacts() {}, async saveManyChats() {}, async getMessageById() { return undefined; },
+    async deleteByInstance() {}, async deleteChats() {}, async deleteMessages() {},
+  };
+  const sessions = new Sessions({
+    discoverFiles: async () => [{ owner: '1', instanceName: name }],
+    discoverDatabase: async () => [{ owner: '1', instanceName: name }], useDatabase: () => true,
+    migrate: async () => {}, loadAuth: async () => createPersistentAuth(repository),
+    createInstance: auth => new Instance({ loadAuth: async () => auth, store, removeSession: async () => {},
+      makeSocket(config) {
+        assert.notEqual(config.auth.creds, previousAuth.state.creds, 'startup must reload the persisted snapshot');
+        const socket = { ev: new EventEmitter(), authState: config.auth, user: { id: jid }, ws: { isOpen: false },
+          end() { socket.ws.isOpen = false; }, profilePictureUrl: async () => undefined };
+        sockets.push(socket); return socket as any;
+      },
+      async emit(event, info, data, history) {
+        const payload = { id: randomUUID(), timestamp: new Date().toISOString(), event, instance: publicInstanceInfo(info), data, ...(history ? { history } : {}) };
+        payloads.push(payload);
+        const response = await fetch(webhookUrl, { method: 'POST', headers: { 'content-type': 'application/json', 'x-webhook-secret': secret }, body: JSON.stringify(payload) });
+        assert.equal(response.status, 200, JSON.stringify(await response.json()));
+      },
+    }),
+  });
+  const dto = async () => connectionDto(db, { ...(await db.query('SELECT * FROM tbl_instances WHERE _id=1'))[0], _role: 'owner' });
+  try {
+    // Readiness failures must preserve the stored linked account during boot.
+    await statuses.refresh(1, true);
+    assert.equal((await dto()).status, 'connected'); assert.equal((await dto()).owner, jid);
+    assert.equal((await dto()).statusVerification.unavailable, true);
+    await sessions.start(); ready = true;
+    assert.equal(sockets.length, 1, 'Sessions.start restores the QR-linked device automatically');
+    await sessions.start(); assert.equal(sockets.length, 1, 'duplicate discovery never creates a second socket');
+    const observation = await provider.readInstanceStatus(1, name);
+    assert.equal(observation.exists, true); assert.equal(observation.data.connectionState, 'reconnecting');
+    await statuses.refresh(1, true);
+    assert.equal((await dto()).status, 'reconnecting'); assert.equal((await dto()).owner, jid);
+    sockets[0].ws.isOpen = true;
+    sockets[0].ev.emit('connection.update', { connection: 'open' });
+    for (let attempt = 0; attempt < 300 && (await dto()).status !== 'connected'; attempt++) await new Promise(done => setTimeout(done, 10));
+    assert.equal((await dto()).status, 'connected', 'the real webhook restores the backend without a panel action');
+    assert.equal((await dto()).owner, jid);
+    assert.equal((await dto()).statusVerification.unavailable, false);
+    assert.equal(sockets[0].authState.creds.registered, false);
+    assert.equal(payloads.some(payload => payload.event === 'connection.open'), true);
+    assert.equal(payloads.some(payload => payload.event.startsWith('qrcode.')), false);
+    assert.equal(connectRequests, 0, 'no HTTP connect request was necessary');
+  } finally {
+    await sessions.shutdown(); await statuses.stop();
+    delete instances[key]; delete instanceConnection[key]; instanceStatus.delete(key);
+    api.closeAllConnections(); back.closeAllConnections();
+    await Promise.all([new Promise<void>(done => api.close(() => done())), new Promise<void>(done => back.close(() => done()))]);
   }
 });

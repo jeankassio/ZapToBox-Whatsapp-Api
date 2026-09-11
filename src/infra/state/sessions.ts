@@ -6,6 +6,7 @@ import Instance from '../baileys/services.js';
 import { listDatabaseSessions, loadInstanceAuth, safeSessionDirectory, type PersistentAuth } from './auth-state.js';
 import PrismaConnection from '../../core/connection/prisma.js';
 import UserConfig from '../config/env.js';
+import { hasLinkedCredentials } from '../../shared/auth-credentials.js';
 
 type SessionPair = { owner: string; instanceName: string };
 interface SessionDependencies {
@@ -123,7 +124,7 @@ export default class Sessions {
         await this.dependencies.migrate(pair.owner, pair.instanceName);
         const auth = await this.dependencies.loadAuth(pair.owner, pair.instanceName);
         // Unpaired/expired entries remain available in the REST listing for manual connect.
-        if (this.stopped || !auth.state.creds.registered) { await auth.drain(); continue; }
+        if (this.stopped || !hasLinkedCredentials(auth.state.creds)) { await auth.drain(); continue; }
         const instance = this.dependencies.createInstance(auth);
         if (this.stopped) break;
         if (instances[key]) continue;

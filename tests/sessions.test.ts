@@ -9,6 +9,37 @@ import type { PersistentAuth } from '../src/infra/state/auth-state.js';
 
 const auth = (registered: boolean) => ({ state: { creds: { registered } }, drain: async () => {} }) as PersistentAuth;
 
+test('startup restores QR-linked credentials with registered=false and leaves incomplete pairing stopped', async t => {
+  const owner = `qr_restore_${randomUUID()}`;
+  const credentials = new Map([
+    ['qr-linked', { registered: false, me: { id: '5511999999999:7@s.whatsapp.net' }, account: { details: Buffer.from([1]) } }],
+    ['code-pending', { registered: false, me: { id: '5511999999999@s.whatsapp.net' }, pairingCode: '12345678' }],
+    ['qr-pending', { registered: false }],
+    ['logged-out', { registered: false }],
+  ]);
+  const pairs = [...credentials.keys()].map(instanceName => ({ owner, instanceName }));
+  const starts: string[] = [];
+  const sessions = new Sessions({
+    discoverFiles: async () => pairs.slice(0, 2), discoverDatabase: async () => pairs, useDatabase: () => true,
+    migrate: async () => {},
+    loadAuth: async (_owner, name) => ({ state: { creds: credentials.get(name) }, drain: async () => {} }) as PersistentAuth,
+    createInstance: () => {
+      const instance = {
+        async create(pair: { owner: string; instanceName: string }) {
+          starts.push(pair.instanceName); instances[`${pair.owner}/${pair.instanceName}`] = instance as unknown as Instance;
+        },
+        async shutdown() {},
+      };
+      return instance as unknown as Instance;
+    },
+  });
+  t.after(async () => { await sessions.shutdown(); for (const pair of pairs) delete instances[`${owner}/${pair.instanceName}`]; });
+  await sessions.start();
+  assert.deepEqual(starts, ['qr-linked'], 'the persisted QR identity must reconnect without a manual HTTP connect');
+  await sessions.start();
+  assert.deepEqual(starts, ['qr-linked'], 'filesystem/database discovery and retries must not duplicate a socket');
+});
+
 test('startup retries failed auth restore, skips unpaired credentials, and never duplicates a restored socket', async t => {
   const owner = `restore_${randomUUID()}`;
   const pairs = ['ready', 'pending', 'unpaired'].map(instanceName => ({ owner, instanceName }));

@@ -28,12 +28,15 @@ function memoryAuth(): AuthRepository {
     async replace(entries) { rows.clear(); await this.write(entries); },
   };
 }
-async function fixture(t: any, options: { registered?: boolean; overrides?: Partial<InstanceDependencies>; initialQR?: boolean } = {}) {
+async function fixture(t: any, options: { registered?: boolean; qrLinked?: boolean; overrides?: Partial<InstanceDependencies>; initialQR?: boolean } = {}) {
   const owner = `qa_${randomUUID()}`;
   const key = `${owner}/one`;
   const authRepository = memoryAuth();
   const auth = await createPersistentAuth(authRepository);
   auth.state.creds.registered = options.registered ?? true;
+  if (options.qrLinked) Object.assign(auth.state.creds, {
+    registered: false, me: { id: '111:7@s.whatsapp.net', name: 'QR fixture' }, account: { details: Buffer.from([1]) },
+  });
   const sockets: any[] = [];
   const webhooks: { event: string; data: any; history?: HistoryChunkMetadata }[] = [];
   const stored = new Map<string, WAMessage>();
@@ -681,6 +684,53 @@ test('registered login stuck before connection.open is replaced after the handsh
   assert.equal(f.sockets.length, 2);
   assert.equal(f.auth.state.creds.registered, true);
   assert.equal(instanceConnection[f.key]!.connectionState, 'reconnecting');
+});
+
+test('QR-linked sessions are supervised and reconnect without changing the provider registered flag', async t => {
+  const f = await fixture(t, { qrLinked: true });
+  const identity = Buffer.from(f.auth.state.creds.noiseKey.private);
+  const result = await f.instance.create({ owner: f.owner, instanceName: 'one' });
+  assert.equal(result.instance.connectionState, 'reconnecting');
+  assert.equal(result.qrCode, undefined);
+  assert.equal(f.auth.state.creds.registered, false);
+  assert.ok((await createPersistentAuth(f.authRepository)).state.creds.account, 'QR credentials are persisted before opening the socket');
+  f.sockets[0].ev.emit('connection.update', { connection: 'connecting' }); await f.flush();
+  assert.equal(instanceConnection[f.key]!.connectionState, 'reconnecting');
+  f.instance.checkHealth(Date.now() + 120_001);
+  for (let attempt = 0; attempt < 100 && f.sockets.length < 2; attempt++) await sleep(5);
+  assert.equal(f.sockets.length, 2, 'a stalled QR login retries automatically');
+  const connected = f.sockets[1]; connected.ws = { isOpen: true };
+  connected.ev.emit('connection.update', { connection: 'open' }); await f.flush();
+  connected.ws.isOpen = false;
+  f.instance.checkHealth();
+  for (let attempt = 0; attempt < 100 && f.sockets.length < 3; attempt++) await sleep(5);
+  assert.equal(f.sockets.length, 3, 'a silently closed QR socket retries automatically');
+  assert.deepEqual(f.auth.state.creds.noiseKey.private, identity);
+  assert.equal(f.auth.state.creds.registered, false);
+  assert.equal(f.webhooks.some(item => /qrcode|connection.removed/.test(item.event)), false);
+  f.sockets[2].ev.emit('connection.update', { connection: 'close', lastDisconnect: { error: { output: { statusCode: DisconnectReason.loggedOut } } } });
+  await f.flush(); f.instance.checkHealth(Date.now() + 300_000); await sleep(20);
+  assert.equal(f.sockets.length, 3, 'phone revocation still cancels QR session recovery');
+  assert.equal(f.auth.state.creds.me, undefined); assert.equal(f.auth.state.creds.account, undefined);
+  assert.equal(f.deleted(), 0);
+});
+
+test('QR-linked disconnect requires a successful remote logout before clearing the signed identity', async t => {
+  const f = await fixture(t, { qrLinked: true });
+  await f.instance.create({ owner: f.owner, instanceName: 'one' });
+  await assert.rejects(f.instance.disconnect(), (error: any) => error.statusCode === 409);
+  assert.ok(f.auth.state.creds.account);
+  const socket = f.sockets[0];
+  socket.ev.emit('connection.update', { connection: 'open' }); await f.flush();
+  socket.logout = async () => { throw new Error('Temporary failure'); };
+  await assert.rejects(f.instance.disconnect(), (error: any) => error.statusCode === 502);
+  assert.ok(f.auth.state.creds.account); assert.equal(socket.ended, 0);
+  let logouts = 0;
+  socket.logout = async () => { logouts++; };
+  const result = await f.instance.disconnect();
+  assert.equal(logouts, 1); assert.equal(result.instance.connectionStatus, 'REMOVED');
+  assert.equal(f.auth.state.creds.me, undefined); assert.equal(f.auth.state.creds.account, undefined);
+  assert.equal(f.deleted(), 0);
 });
 
 test('supervision never revives a revoked session or expires a valid QR awaiting pairing', async t => {

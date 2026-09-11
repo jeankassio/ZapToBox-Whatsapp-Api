@@ -52,7 +52,7 @@ Envios e edições de texto incluem prévias de links quando o site disponibiliz
 
 Crie uma conexão pelo frontend ou por `POST /instances/create`, conforme a [documentação HTTP completa](docs/api.md). A rota exige `Idempotency-Key` UUID v4 e é idempotente para a mesma identidade `owner/instanceName`; `GET /instances/status/:owner/:instanceName` permite reconciliação exata sem listar outras sessões. A nova sessão precisa ser pareada por QR no aplicativo WhatsApp. A API também aceita `phoneNumber` para solicitar código. Sucesso HTTP na criação não significa conta online: aguarde `connection.open`.
 
-Signal keys, histórico e contatos são persistidos por instância. Reiniciar e reconectar preservam histórico. Webhooks usam gravação atômica, retries e dead-letter; veja [eventos, payloads e operação da fila](docs/webhooks.md).
+Signal keys, histórico e contatos são persistidos por instância. Reiniciar e reconectar preservam histórico. Sessões válidas são restauradas automaticamente após reiniciar, inclusive pareamentos por QR Code cujas credenciais Baileys mantêm `registered: false`; veja [restauração após atualizar](docs/startup.md#restauração-automática-das-conexões-após-atualizar--10092026). Webhooks usam gravação atômica, retries e dead-letter; veja [eventos, payloads e operação da fila](docs/webhooks.md).
 
 Os [contratos de nomes, leitura e mídia sob demanda](docs/contact-names-and-demand.md) preservam a prioridade dos nomes salvos no celular, a origem das alterações e os timestamps durante reimportações. A atualização exige a migration de metadata dos contatos.
 

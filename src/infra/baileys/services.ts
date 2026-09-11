@@ -10,6 +10,7 @@ import QRCode from 'qrcode';
 import { randomUUID } from 'node:crypto';
 import { baileysEvents, instanceConnection, instances, instanceStatus, sessionsPath } from '../../shared/constants.js';
 import { instanceKey } from '../../shared/identity.js';
+import { hasLinkedCredentials } from '../../shared/auth-credentials.js';
 import { publicInstanceInfo, updateConnectionStatus } from '../../shared/instance-info.js';
 import { genProxy, removeInstancePath, trySendWebhook } from '../../shared/utils.js';
 import type { ConnectionState, ConnectionStatus, Contact, HistoryChunkMetadata, InstanceData, InstanceInfo, MessageWebhook } from '../../shared/types.js';
@@ -112,7 +113,7 @@ export default class Instance {
     this.qrCode = undefined; this.pairingCode = undefined; this.qrCount = 0; this.pairingRequested = false;
     this.instance = { owner: this.owner, instanceName: this.instanceName, connectionStatus: 'OFFLINE' };
     instances[key] = this; instanceConnection[key] = this.instance;
-    this.setStatus('OFFLINE', this.auth?.state.creds.registered ? 'reconnecting' : 'pairing');
+    this.setStatus('OFFLINE', hasLinkedCredentials(this.auth?.state.creds) ? 'reconnecting' : 'pairing');
     this.initial = new Promise(resolve => { this.initialResolver = resolve; });
     const task = this.startAndWait();
     this.startTask = task;
@@ -129,7 +130,7 @@ export default class Instance {
       }
       return this.result();
     }
-    if (this.auth?.state.creds.registered || this.stopped) return this.result();
+    if (hasLinkedCredentials(this.auth?.state.creds) || this.stopped) return this.result();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([this.initial, new Promise<void>(resolve => { timer = setTimeout(resolve, Math.min(this.dependencies.qrTimeoutMs, 10_000)); })]);
@@ -148,9 +149,9 @@ export default class Instance {
       await this.auth?.drain();
       this.auth ??= await this.dependencies.loadAuth(this.owner, this.instanceName);
       if (this.stopped || generation !== this.generation) return;
-      this.setStatus('OFFLINE', this.auth.state.creds.registered ? 'reconnecting' : 'pairing');
+      this.setStatus('OFFLINE', hasLinkedCredentials(this.auth.state.creds) ? 'reconnecting' : 'pairing');
       // Retry a failed credentials write before reopening the transport.
-      if (this.auth.state.creds.registered) await this.auth.saveCreds();
+      if (hasLinkedCredentials(this.auth.state.creds)) await this.auth.saveCreds();
       if (this.stopped || generation !== this.generation) return;
       const agents = await genProxy(UserConfig.proxyUrl);
       if (this.stopped || generation !== this.generation) return;
@@ -282,7 +283,7 @@ export default class Instance {
     this.generation++;
     this.stopped = !retry;
     this.revoked = revoked;
-    this.setStatus(revoked ? 'REMOVED' : 'OFFLINE', retry ? (this.auth?.state.creds.registered ? 'reconnecting' : 'pairing') : 'disconnected');
+    this.setStatus(revoked ? 'REMOVED' : 'OFFLINE', retry ? (hasLinkedCredentials(this.auth?.state.creds) ? 'reconnecting' : 'pairing') : 'disconnected');
     this.detachSocket();
     // Do not queue recovery behind a blocked message/history database write.
     this.eventTail = Promise.resolve();
@@ -345,7 +346,7 @@ export default class Instance {
             this.closeSocket(generation, history, closeReason(update));
             return;
           } else if (update.connection === 'open') { this.connectedAt = Date.now(); this.setStatus('ONLINE'); }
-          else if (update.connection === 'connecting') this.setStatus('OFFLINE', this.auth?.state.creds.registered ? 'reconnecting' : 'pairing');
+          else if (update.connection === 'connecting') this.setStatus('OFFLINE', hasLinkedCredentials(this.auth?.state.creds) ? 'reconnecting' : 'pairing');
         }
         const historyBatch = event === 'messaging-history.set';
         const settleBatch = historyBatch ? history.queueBatch() : undefined;
@@ -368,7 +369,7 @@ export default class Instance {
       if (typeof update.receivedPendingNotifications === 'boolean') {
         await emit('messaging-history.progress', history.pendingNotifications(update.receivedPendingNotifications));
       }
-      if (update.qr && !sock.authState.creds.registered) {
+      if (update.qr && !hasLinkedCredentials(sock.authState.creds)) {
         if (++this.qrCount > this.dependencies.qrLimit) {
           await emit(this.phoneNumber ? 'pairingcode.limit' : 'qrcode.limit', { qrCodeLimit: this.dependencies.qrLimit });
           this.stopped = true; this.generation++; this.detachSocket(); this.setStatus('OFFLINE'); this.finishInitial();
@@ -531,12 +532,12 @@ export default class Instance {
 
   private scheduleReconnect(minimumDelayMs = 0): void {
     if (this.stopped || this.retryTimer) { this.finishInitial(); return; }
-    // A temporary network outage can last hours. Keep retrying registered
+    // A temporary network outage can last hours. Keep retrying linked
     // sessions with capped backoff; terminal logout reasons never reach here.
     const ceiling = Math.min(this.dependencies.reconnectMaxDelayMs, this.dependencies.reconnectDelayMs * 2 ** Math.min(this.reconnectAttempts++, 16));
     const jitter = this.dependencies.random();
     const wait = Math.max(1, Math.round(ceiling * (0.5 + jitter * 0.5)), Math.round(minimumDelayMs * (1 + jitter * 0.25)));
-    this.setStatus('OFFLINE', this.auth?.state.creds.registered || !this.auth ? 'reconnecting' : 'pairing');
+    this.setStatus('OFFLINE', hasLinkedCredentials(this.auth?.state.creds) || !this.auth ? 'reconnecting' : 'pairing');
     console.info(`[${this.key}] Reconnect attempt=${this.reconnectAttempts} delayMs=${wait}`);
     this.retryTimer = setTimeout(() => {
       this.retryTimer = undefined;
@@ -556,7 +557,7 @@ export default class Instance {
 
   /** Supervised independently of HTTP polling and the message/history queues. */
   checkHealth(now = Date.now()): void {
-    if (this.stopped || this.retryTimer || this.setupTask || !this.sock || !this.history || !this.auth?.state.creds.registered) return;
+    if (this.stopped || this.retryTimer || this.setupTask || !this.sock || !this.history || !hasLinkedCredentials(this.auth?.state.creds)) return;
     const transportClosed = this.instance?.connectionStatus === 'ONLINE' && this.sock.ws?.isOpen === false;
     const loginStalled = !this.connectedAt && now - this.socketStartedAt >= this.dependencies.handshakeTimeoutMs;
     if (transportClosed || loginStalled) {
@@ -622,7 +623,7 @@ export default class Instance {
   async disconnect(): Promise<ConnectResult> {
     if (!this.instance) throw new RequestError(404, 'Instance not found.');
     const sock = this.sock;
-    if (this.auth?.state.creds.registered) {
+    if (hasLinkedCredentials(this.auth?.state.creds)) {
       if (!sock || this.instance.connectionStatus !== 'ONLINE' || (sock.ws && !sock.ws.isOpen)) throw new RequestError(409, 'Instance not connected.');
       // Do not erase credentials if the remote logout could not be sent.
       try { await sock.logout('Device disconnected by its owner'); }

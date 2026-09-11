@@ -4,6 +4,16 @@
 
 Nesta API existe uma única abertura do servidor HTTP. `prisma generate` e `tsc` não iniciam a fila de webhooks. Portanto, mensagens de retry que aparecem durante `npm run build` indicam outro processo ativo/logs intercalados, ou código diferente do que foi publicado nesta pasta.
 
+## Restauração automática das conexões após atualizar — 10/09/2026
+
+A API anterior ignorava, na inicialização, credenciais com `registered: false`. No Baileys 7.0.0-rc14, o pareamento por QR Code salva a identidade do dispositivo (`me`) e a conta assinada (`account`) sem alterar essa flag. Por isso uma sessão válida ficava parada após reiniciar, mas voltava ao clicar em **Conectar**: o caminho manual não aplicava o mesmo filtro.
+
+A restauração agora reconhece tanto `registered: true` quanto `me.id` junto de `account`. A mesma regra vale para estado de reconexão, persistência antes de abrir o socket, supervisão de transporte e logout. A flag do Baileys é preservada. Solicitar um código de pareamento já preenche `me`, mas não `account`: esse pareamento incompleto continua aguardando confirmação. Logout confirmado remove a identidade assinada e impede a restauração.
+
+Para esta correção, publique **somente a API WhatsApp**, execute `npm run build` e reinicie seu processo existente pelo painel. Com PM2 como único supervisor, `npm run build:pm2` compila e reinicia. Preserve a configuração e os dados de autenticação existentes. Não há migration, dependência nova ou necessidade de refazer o QR de uma sessão ainda válida. Interrupções de rede durante o reinício continuam possíveis; a retomada deixa de depender do botão **Conectar**.
+
+Validação: regressão de restauração reproduzida antes da correção; testes com o cálculo real de pareamento do Baileys e chaves geradas localmente; persistência em memória e filesystem; supervisão, logout e restauração integrada ao backend por HTTP/webhook. Os sockets dos testes são simulados e não utilizam uma conta WhatsApp real.
+
 ## Verificar no servidor com o erro
 
 Execute na pasta da API:
