@@ -1,5 +1,7 @@
 import dotenv from "dotenv";
 dotenv.config({ quiet: true });
+import { readWhatsAppOptions } from "./whatsapp-options.js";
+const whatsappOptions = readWhatsAppOptions(process.env);
 
 function numberEnv(name: string, fallback: number, min: number, max: number): number {
   const value = Number(process.env[name] ?? fallback);
@@ -14,8 +16,9 @@ export default class UserConfig {
   static jwtToken = process.env.JWT_TOKEN || "";
   static webhookUrl = process.env.WEBHOOK_URL || "";
   static webhookSecret = process.env.WEBHOOK_SECRET || "";
-  static sessionClient = process.env.SESSION || "Linux";
-  static sessionName = process.env.PHONE_NAME || "Desktop";
+  static whatsapp = whatsappOptions;
+  static sessionClient = whatsappOptions.browser[0];
+  static sessionName = whatsappOptions.browser[1];
   static proxyUrl = process.env.PROXY_URL || undefined;
   static useWebhookQueue = process.env.WEBHOOK_QUEUE !== "false";
   static webhook_queue_dir = process.env.WEBHOOK_QUEUE_DIR || "./webhook-queue";

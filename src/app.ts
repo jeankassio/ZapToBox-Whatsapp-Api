@@ -1,3 +1,4 @@
+import { apiLogger } from './infra/logging/logger.js';
 import express, { type ErrorRequestHandler } from "express";
 import Token from "./infra/state/auth.js";
 import UserConfig from "./infra/config/env.js";
@@ -37,7 +38,7 @@ export function createApp(options: { token?:string; ready?:()=>Promise<void>; is
   app.post("/webhooks/queue/replay",async(req,res)=>{
     if(!req.auth?.admin){res.status(403).json({error:"Administrator token required"});return;}
     const replayed = await webhookOutbox.replayDeadLetters();
-    void webhookOutbox.flush().catch(()=>console.error("Webhook replay failed; events remain on disk"));
+    void webhookOutbox.flush().catch(()=>apiLogger.error("Webhook replay failed; events remain on disk"));
     res.json({success:true,replayed});
   });
   app.use("/instances",new InstanceRoutes().get());

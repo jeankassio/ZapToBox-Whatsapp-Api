@@ -1,3 +1,4 @@
+import { apiLogger } from '../logging/logger.js';
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomUUID, createHash } from "node:crypto";
@@ -87,7 +88,7 @@ export class WebhookOutbox {
     if (this.options.logError) {
       try { this.options.logError(diagnostic); return; } catch { /* Logging must not change retry behavior. */ }
     }
-    console.error("Webhook queue storage processing failed; persisted events remain available", diagnostic);
+    apiLogger.error("Webhook queue storage processing failed; persisted events remain available", diagnostic);
   }
   async enqueue(event: string, instance: InstanceInfo, data: unknown, history?: HistoryChunkMetadata, identity?: { id: string; timestamp: string }): Promise<string | undefined> {
     if (this.lifecycle && event.startsWith('connection.')) return this.lifecycle.enqueue(event, instance, data, history, identity);
@@ -176,7 +177,7 @@ export class WebhookOutbox {
       }
       if (!(error instanceof SyntaxError) && (error as NodeJS.ErrnoException).code) throw error;
       await this.quarantine(filename,".invalid");
-      console.error("Invalid webhook file moved to dead-letter");
+      apiLogger.error("Invalid webhook file moved to dead-letter");
       return undefined;
     }
   }
@@ -231,7 +232,7 @@ export class WebhookOutbox {
               if (this.discarded(record)) { await fs.unlink(filename).catch(error => { if (error.code !== 'ENOENT') throw error; }); blocked = true; break; }
               if (record.attempts >= this.options.maxAttempts) {
                 await this.quarantine(filename);
-                console.error("Webhook retry limit reached; event retained in dead-letter");
+                apiLogger.error("Webhook retry limit reached; event retained in dead-letter");
               }
               blocked = true; break;
             }

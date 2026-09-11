@@ -17,7 +17,9 @@
     "start:pm2": "pm2 startOrRestart ecosystem.config.json --only zaptobox-whatsapp-api --update-env",
     "restart:pm2": "npm run start:pm2",
     "build:pm2": "npm run build && npm run start:pm2",
-    "pm2": "npm run start:pm2"
+    "pm2": "npm run start:pm2",
+    "test:api-options": "tsx --test tests/api-options.test.ts tests/api-logging.test.ts tests/contact-safety.test.ts tests/contact-controller.test.ts && node --test tests/provider-contact-guard.test.mjs",
+    "check:api-options": "node tools/check-api-options.mjs"
   },
   "repository": {
     "type": "git",

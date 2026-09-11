@@ -179,7 +179,8 @@ export async function createPersistentAuth(repository: AuthRepository, legacyDir
           const storedValue = records[id] ?? legacy[legacyFilename(type, id)];
           if (storedValue == null) continue;
           let value = revive(storedValue);
-          if (type === 'app-state-sync-key') value = proto.Message.AppStateSyncKeyData.create(value);
+          // JSON can encode keyData as base64. Restore bytes as Baileys' reference adapter does.
+          if (type === 'app-state-sync-key') value = proto.Message.AppStateSyncKeyData.fromObject(value);
           result[id] = value;
         }
         return result;

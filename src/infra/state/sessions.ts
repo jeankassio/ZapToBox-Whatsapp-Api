@@ -1,3 +1,4 @@
+import { apiLogger } from '../logging/logger.js';
 import { mkdir, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { instances, sessionsPath } from '../../shared/constants.js';
@@ -44,7 +45,7 @@ export async function discoverFileSessions(root: string): Promise<SessionPair[]>
       try {
         await safeSessionDirectory(root, owner.name, directory.name);
         pairs.push({ owner: owner.name, instanceName: directory.name });
-      } catch { console.error('Ignored unsafe session directory'); }
+      } catch { apiLogger.error('Ignored unsafe session directory'); }
     }
   }
   return pairs;
@@ -79,7 +80,7 @@ export default class Sessions {
       this.healthTimer = setInterval(() => {
         for (const [key, instance] of Object.entries(instances)) {
           try { instance.checkHealth(); }
-          catch { console.error(`[${key}] Session supervision failed; credentials preserved`); }
+          catch { apiLogger.error(`[${key}] Session supervision failed; credentials preserved`); }
         }
       }, this.dependencies.healthIntervalMs);
       this.healthTimer.unref();
@@ -87,7 +88,7 @@ export default class Sessions {
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = undefined;
     const task = this.restore().catch(() => {
-      console.error('Session discovery failed; stored credentials preserved');
+      apiLogger.error('Session discovery failed; stored credentials preserved');
       this.scheduleRetry();
     });
     this.starting = task;
@@ -99,7 +100,7 @@ export default class Sessions {
     if (this.stopped || this.retryTimer) return;
     const ceiling = Math.min(this.dependencies.retryMaxDelayMs, this.dependencies.retryDelayMs * 2 ** Math.min(this.attempts++, 16));
     const delay = Math.max(1, Math.round(ceiling * (0.5 + this.dependencies.random() * 0.5)));
-    console.info(`Session restore retry attempt=${this.attempts} delayMs=${delay}`);
+    apiLogger.info(`Session restore retry attempt=${this.attempts} delayMs=${delay}`);
     this.retryTimer = setTimeout(() => { this.retryTimer = undefined; void this.start(); }, delay);
     this.retryTimer.unref();
   }
@@ -115,7 +116,7 @@ export default class Sessions {
     for (const [key, pair] of all) {
       if (this.stopped) break;
       if (ambiguous.has(`${pair.owner}_${pair.instanceName}`)) {
-        console.error(`[${key}] Legacy database key is ambiguous; resolve ownership before restoring`);
+        apiLogger.error(`[${key}] Legacy database key is ambiguous; resolve ownership before restoring`);
         continue;
       }
       if (instances[key]) continue;
@@ -132,7 +133,7 @@ export default class Sessions {
         await instance.create(pair);
       } catch {
         failed = true;
-        console.error(`[${key}] Session restore failed; preserved stored credentials and history`);
+        apiLogger.error(`[${key}] Session restore failed; preserved stored credentials and history`);
         if (startedInstance) {
           await startedInstance.shutdown();
           if (instances[key] === startedInstance) delete instances[key];

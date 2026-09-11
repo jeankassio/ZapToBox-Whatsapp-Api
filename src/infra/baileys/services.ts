@@ -1,11 +1,13 @@
 import makeWASocket, {
-  Browsers, DisconnectReason, getAggregateVotesInPollMessage, getContentType, PROCESSABLE_HISTORY_TYPES,
+  DisconnectReason, getAggregateVotesInPollMessage, getContentType, PROCESSABLE_HISTORY_TYPES,
   makeCacheableSignalKeyStore, proto, type BaileysEventMap, type GroupMetadata,
   type WAMessage, type WAMessageKey, type WASocket,
   type SignalDataTypeMap,
 } from '@whiskeysockets/baileys';
 import { BoundedCache } from '../../shared/bounded-cache.js';
-import { pino } from 'pino';
+import { apiLogger, instanceLogger, providerLogger } from '../logging/logger.js';
+import { ContactSafety, registerContactSafety, getContactSafety, type ProviderContactGuardInput } from './contact-safety.js';
+import { isProviderContactGuardInstalled } from './provider-contact-guard.js';
 import QRCode from 'qrcode';
 import { randomUUID } from 'node:crypto';
 import { baileysEvents, instanceConnection, instances, instanceStatus, sessionsPath } from '../../shared/constants.js';
@@ -147,7 +149,7 @@ export default class Instance {
     try { await this.startSocket(); }
     catch {
       if (!this.stopped) {
-        console.error(`[${this.key}] Socket setup failed; credentials preserved`);
+        apiLogger.error(`[${this.key}] Socket setup failed; credentials preserved`);
         this.scheduleReconnect();
       }
       return this.result();
@@ -177,11 +179,17 @@ export default class Instance {
       if (this.stopped || generation !== this.generation) return;
       const agents = await genProxy(UserConfig.proxyUrl);
       if (this.stopped || generation !== this.generation) return;
-      const logger = pino({ level: 'silent' });
-      const client = UserConfig.sessionClient.toLowerCase();
-      const browser = ['windows', 'win32'].includes(client) ? Browsers.windows(UserConfig.sessionName)
-        : ['mac', 'macos', 'mac os', 'darwin'].includes(client) ? Browsers.macOS(UserConfig.sessionName)
-        : Browsers.ubuntu(UserConfig.sessionName);
+      const guardInstalled = isProviderContactGuardInstalled();
+      const contactSafety = new ContactSafety(UserConfig.whatsapp, instanceLogger(this.key), guardInstalled);
+      const logger = providerLogger(this.key, (level, args) => contactSafety.observe(level, args));
+      const browser = UserConfig.whatsapp.browser;
+      const contactGuardConfig = {
+        zaptoboxContactGuard: (input: ProviderContactGuardInput) => contactSafety.guardProviderWrite(input),
+      };
+      instanceLogger(this.key).info({ event: 'wa.socket.config', sessionLabel: browser[0], browserName: browser[1],
+        mode: UserConfig.whatsapp.contactMode, logLevel: UserConfig.whatsapp.logLevel,
+        baileysLogLevel: UserConfig.whatsapp.baileysLogLevel, queryTimeoutMs: UserConfig.whatsapp.queryTimeoutMs,
+        code: guardInstalled ? 'CONTACT_GUARD_READY' : 'CONTACT_GUARD_MISSING' }, 'WhatsApp socket configuration');
       const active = () => !this.stopped && generation === this.generation;
       const auth = this.auth;
       const history = new HistoryProgressTracker(Boolean(auth.state.creds.accountSyncCounter));
@@ -203,7 +211,10 @@ export default class Instance {
       // Release-pinned defaults avoid a remote version fetch on every reconnect.
       const sock = this.dependencies.makeSocket({
         auth: { creds: auth.state.creds, keys: makeCacheableSignalKeyStore(keys, logger, new BoundedCache(4096, 300)) },
-        browser, emitOwnEvents: true,
+        browser, emitOwnEvents: true, ...contactGuardConfig,
+        defaultQueryTimeoutMs: UserConfig.whatsapp.queryTimeoutMs,
+        // Verification stays enabled; there is no .env switch to disable integrity checks.
+        appStateMacVerification: { snapshot: true, patch: true },
         markOnlineOnConnect: false, syncFullHistory: true, generateHighQualityLinkPreview: false,
         shouldSyncHistoryMessage: notification => {
           if (!active() || this.sock?.ws?.isOpen === false) return false;
@@ -229,6 +240,7 @@ export default class Instance {
         cachedGroupMetadata: async jid => this.groupCache.get<GroupMetadata>(jid),
         getMessage: key => active() ? this.trackOperation(() => this.getMessage(key)) : Promise.resolve(undefined), qrTimeout: this.dependencies.qrTimeoutMs,
       });
+      registerContactSafety(sock, contactSafety);
       this.sock = sock;
       this.socketStartedAt = Date.now();
       this.connectedAt = 0;
@@ -275,7 +287,7 @@ export default class Instance {
       await handler();
     }).catch(async () => {
       // Payloads/errors may contain QR codes, tokens or message text.
-      console.error(`[${this.key}] Failed to process ${event}`);
+      apiLogger.error(`[${this.key}] Failed to process ${event}`);
       // A pending write from an old socket must never stop its replacement.
       if (!this.stopped && generation === this.generation) this.closeSocket(generation, history, undefined, event);
     });
@@ -286,7 +298,7 @@ export default class Instance {
   }
 
   private backgroundEvent(task: Promise<void>, label: string): void {
-    const handled = task.catch(() => console.error(`[${this.key}] Could not enqueue ${label}`));
+    const handled = task.catch(() => apiLogger.error(`[${this.key}] Could not enqueue ${label}`));
     this.eventTasks.add(handled);
     void handled.finally(() => this.eventTasks.delete(handled));
   }
@@ -307,12 +319,13 @@ export default class Instance {
     this.stopped = !retry;
     this.revoked = revoked;
     this.setStatus(revoked ? 'REMOVED' : 'OFFLINE', retry ? (hasLinkedCredentials(this.auth?.state.creds) ? 'reconnecting' : 'pairing') : 'disconnected');
+    if (this.sock) getContactSafety(this.sock)?.setConnected(false);
     this.detachSocket();
     // Do not queue recovery behind a blocked message/history database write.
     this.eventTail = Promise.resolve();
     this.qrCode = undefined; this.pairingCode = undefined;
     const snapshot = { ...this.instance! };
-    console.info(`[${this.key}] Transport closed code=${reason ?? 'unknown'} state=${snapshot.connectionState}${failedEvent ? ' cause=EVENT_PROCESSING_FAILED' : ''}`);
+    apiLogger.info(`[${this.key}] Transport closed code=${reason ?? 'unknown'} state=${snapshot.connectionState}${failedEvent ? ' cause=EVENT_PROCESSING_FAILED' : ''}`);
     this.backgroundEvent(this.dependencies.emit(revoked ? 'connection.removed' : 'connection.close', snapshot,
       { reason: reason ?? null, ...(failedEvent ? { error: 'EVENT_PROCESSING_FAILED' } : {}) }), 'connection closure');
     const progress = failedEvent?.startsWith('messaging-history.') ? history.failure() : history.snapshot('interrupted');
@@ -371,10 +384,14 @@ export default class Instance {
           if (socketClosed) return;
           const update = data as BaileysEventMap['connection.update'];
           if (update.connection === 'close') {
+            const gate = getContactSafety(sock);
+            gate?.setConnected(false);
+            instanceLogger(this.key).warn({ event: 'wa.connection.close', generation,
+              err: update.lastDisconnect?.error, ...gate?.snapshot() }, 'WhatsApp connection closed');
             socketClosed = true;
             this.closeSocket(generation, history, closeReason(update));
             return;
-          } else if (update.connection === 'open') { this.connectedAt = Date.now(); this.setStatus('ONLINE'); }
+          } else if (update.connection === 'open') { getContactSafety(sock)?.setConnected(true); this.connectedAt = Date.now(); this.setStatus('ONLINE'); }
           else if (update.connection === 'connecting') this.setStatus('OFFLINE', hasLinkedCredentials(this.auth?.state.creds) ? 'reconnecting' : 'pairing');
         }
         const historyBatch = event === 'messaging-history.set';
@@ -430,7 +447,7 @@ export default class Instance {
         this.finishInitial();
         await this.trackOperation(() => this.auth!.saveCreds(), true);
         if (socketClosed || this.stopped || generation !== this.generation) return;
-        console.info(`[${this.key}] Transport connected`);
+        apiLogger.info(`[${this.key}] Transport connected`);
         await emit('connection.open', { connection: 'open' });
         await emit('messaging-history.progress', history.snapshot());
         // Photo lookup failure must not suppress the connection event or block startup.
@@ -567,12 +584,12 @@ export default class Instance {
     const jitter = this.dependencies.random();
     const wait = Math.max(1, Math.round(ceiling * (0.5 + jitter * 0.5)), Math.round(minimumDelayMs * (1 + jitter * 0.25)));
     this.setStatus('OFFLINE', hasLinkedCredentials(this.auth?.state.creds) || !this.auth ? 'reconnecting' : 'pairing');
-    console.info(`[${this.key}] Reconnect attempt=${this.reconnectAttempts} delayMs=${wait}`);
+    apiLogger.info(`[${this.key}] Reconnect attempt=${this.reconnectAttempts} delayMs=${wait}`);
     this.retryTimer = setTimeout(() => {
       this.retryTimer = undefined;
       if (this.stopped) return;
       void this.startSocket().catch(() => {
-        console.error(`[${this.key}] Socket reconnect failed`);
+        apiLogger.error(`[${this.key}] Socket reconnect failed`);
         this.scheduleReconnect();
       });
     }, wait);
@@ -590,7 +607,7 @@ export default class Instance {
     const transportClosed = this.instance?.connectionStatus === 'ONLINE' && this.sock.ws?.isOpen === false;
     const loginStalled = !this.connectedAt && now - this.socketStartedAt >= this.dependencies.handshakeTimeoutMs;
     if (transportClosed || loginStalled) {
-      console.warn(`[${this.key}] Transport supervision detected ${transportClosed ? 'closed socket without notification' : 'login timeout'}`);
+      apiLogger.warn(`[${this.key}] Transport supervision detected ${transportClosed ? 'closed socket without notification' : 'login timeout'}`);
       this.closeSocket(this.generation, this.history, transportClosed ? DisconnectReason.connectionClosed : DisconnectReason.timedOut);
     }
   }

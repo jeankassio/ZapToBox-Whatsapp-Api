@@ -1,3 +1,4 @@
+import { apiLogger } from '../logging/logger.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { instanceKey, splitInstanceKey } from '../../shared/identity.js';
 import type { HistoryChunkMetadata, InstanceInfo } from '../../shared/types.js';
@@ -124,7 +125,7 @@ export class HistoryRescanService {
     this.stopped = false;
     this.timer = setInterval(() => this.wake(), 1000); this.timer.unref(); this.wake();
   }
-  private wake() { if (!this.stopped) void this.runOnce().catch(() => console.error('History rescan cycle failed; durable jobs remain available.')); }
+  private wake() { if (!this.stopped) void this.runOnce().catch(() => apiLogger.error('History rescan cycle failed; durable jobs remain available.')); }
   async stop() { this.stopped = true; if (this.timer) clearInterval(this.timer); this.timer = undefined; await this.flight; }
   runOnce(): Promise<void> {
     if (this.stopped || !this.options.configured()) return Promise.resolve();

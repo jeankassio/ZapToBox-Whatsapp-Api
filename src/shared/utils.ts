@@ -1,3 +1,4 @@
+import { apiLogger } from '../infra/logging/logger.js';
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { HttpsProxyAgent } from "https-proxy-agent";
@@ -56,7 +57,7 @@ export async function trySendWebhook(event:string,instance:InstanceData,data:unk
     webhookOutbox.discardInstance(instance.owner, instance.instanceName),
     import('../infra/history-rescan/index.js').then(({ historyRescan }) => historyRescan.cancel(instance.owner, instance.instanceName, closedAt)),
   ]) : undefined;
-  void discarded?.catch(() => console.error('Could not clear disconnected instance work.'));
+  void discarded?.catch(() => apiLogger.error('Could not clear disconnected instance work.'));
   const info = {
     owner:instance.owner,instanceName:instance.instanceName,connectionStatus:instance.connectionStatus,
     ...(instance.connectionState ? {connectionState:instance.connectionState} : {}),

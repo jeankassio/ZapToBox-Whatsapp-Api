@@ -37,3 +37,8 @@ replaceEvent('const { messages, type } = eventData;', 'const { messages, type, r
 replaceEvent("type: type === 'notify' || data.messageUpserts[key]?.type === 'notify' ? 'notify' : type\n", "type: type === 'notify' || data.messageUpserts[key]?.type === 'notify' ? 'notify' : type,\n                        requestId\n");
 replaceEvent('messages: messageUpsertList.map(m => m.message),\n            type\n', 'messages: messageUpsertList.map(m => m.message),\n            type,\n            requestId: messageUpsertList[0].requestId\n');
 if (eventsPatched !== eventsSource) { await writeFile(eventsTarget, eventsPatched); console.log('Applied provider buffered message-origin compatibility patch.'); }
+
+// Keep provider compatibility adaptations together for postinstall/build/test.
+// This only gates contact mutations; it does not skip MACs, reset auth, or change other actions.
+const { installContactGuard } = await import('./patch-provider-contact-guard.mjs');
+await installContactGuard(root);
