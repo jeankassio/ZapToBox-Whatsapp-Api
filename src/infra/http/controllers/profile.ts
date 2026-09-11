@@ -25,20 +25,56 @@ function providerPhoneMatches(requested: string, resolved: string): boolean {
 export default class ProfileController extends SocketController {
   constructor(owner: string, name: string, private readonly profileDependencies: ProfileDependencies = {}) { super(owner, name, profileDependencies); }
   contactName(remoteJid: string, name: string) { return this.perform('Contact name changed in WhatsApp.', async sock => {
-    if (!/^\d{5,20}(?::\d{1,5})?@(?:s\.whatsapp\.net|lid)$/.test(remoteJid)) throw new RequestError(400, 'An individual WhatsApp contact is required.');
+    const id = contactJid(remoteJid);
+    if (!id || (id.endsWith('@s.whatsapp.net') && !phoneJid(id))) throw new RequestError(400, 'An individual WhatsApp contact is required.');
     if (typeof name !== 'string' || !name.trim() || name.length > 200 || /[\u0000-\u001f\u007f]/.test(name)) throw new RequestError(400, 'Invalid contact name.');
     if (typeof sock.addOrEditContact !== 'function') throw new RequestError(501, 'Contact editing is unavailable in this WhatsApp provider.');
-    const id = remoteJid.replace(/:\d+@/, '@'), fullName = name.trim();
+    const fullName = name.trim();
+    const assertCurrent = () => { if (this.sock !== sock) throw new RequestError(409, 'Instance connection changed during contact lookup.'); };
     const existing = await this.repository!.getContactById(this.instance, id);
-    const identifiers = [id, existing?.id, existing?.phoneNumber, existing?.lid];
-    const pnJid = identifiers.find(value => value && /^\d{5,20}@s\.whatsapp\.net$/.test(value));
-    const lidJid = identifiers.find(value => value && /^\d{5,20}@lid$/.test(value));
-    if (this.sock !== sock) throw new RequestError(409, 'Instance connection changed during contact lookup.');
-    // rc14 waits for the app-state IQ response and persists its version before
-    // resolving. A rejected/uncertain provider operation must not become a local rename.
-    await sock.addOrEditContact(id, { fullName, ...(pnJid ? { pnJid } : {}), ...(lidJid ? { lidJid } : {}), saveOnPrimaryAddressbook: true });
+    assertCurrent();
+
+    const storedIds = [existing?.id, existing?.phoneNumber, existing?.lid].map(contactJid);
+    // A name edit must never repair or invent an association between identities.
+    if (existing && !storedIds.includes(id)) throw new RequestError(422, 'The stored contact address does not match this chat.');
+    const identifiers = [id, ...storedIds];
+    const phones = [...new Set(identifiers.map(phoneJid).filter((value): value is string => !!value))];
+    const lids = [...new Set(identifiers.filter((value): value is string => !!value?.endsWith('@lid')))];
+    if (phones.length > 1 || lids.length > 1) throw new RequestError(422, 'The contact has conflicting WhatsApp addresses.');
+
+    let pnJid = phoneJid(id);
+    const lidJid = lids[0];
+    if (!pnJid) {
+      // A chat LID is not a telephone number. First read the mapping learned by
+      // this socket; never obtain a PN by changing the @lid suffix or its digits.
+      const mapping = sock.signalRepository?.lidMapping;
+      const mapped = await mapping?.getPNForLID(id);
+      assertCurrent();
+      pnJid = phoneJid(mapped);
+      if (mapped && !pnJid) throw new RequestError(422, 'The WhatsApp contact mapping has an invalid phone address.');
+      if (pnJid && phones[0] && pnJid !== phones[0]) throw new RequestError(422, 'The stored phone number conflicts with the WhatsApp contact mapping.');
+      if (!pnJid && phones[0]) {
+        // A persisted PN is only a candidate. If the reverse mapping is missing,
+        // confirm its LID with the provider before using it as the patch target.
+        const confirmedLid = contactJid(await mapping?.getLIDForPN(phones[0]));
+        assertCurrent();
+        if (confirmedLid === id) pnJid = phones[0];
+      }
+      if (!pnJid) throw new RequestError(422, 'The phone number for this contact could not be confirmed. Save it on the phone or wait for contact synchronization.');
+    }
+
+    // Check readiness without resetting, creating or overwriting app-state keys.
+    // Baileys remains responsible for synchronizing, signing and sending the patch.
+    if (!sock.authState?.creds.myAppStateKeyId) throw new RequestError(503, 'Contact synchronization is not ready yet. Wait for the WhatsApp session to finish synchronizing.');
+    assertCurrent();
+    // rc14 contact actions carry the PN in the index. Do not attach pnJid/lidJid
+    // to a name-only action: those fields can also express identity mappings.
+    // Keep the primary-address-book request; this is not a local-only nickname.
+    // Await exactly one provider write. An uncertain result must not be retried
+    // here or converted into a successful local rename.
+    await sock.addOrEditContact(pnJid, { fullName, saveOnPrimaryAddressbook: true });
     const accepted: Contact = { id, name: fullName, savedName: fullName, savedNameUpdatedAt: new Date().toISOString(), nameSource: 'saved',
-      ...(pnJid && pnJid !== id ? { phoneNumber: pnJid } : {}), ...(lidJid && lidJid !== id ? { lid: lidJid } : {}) };
+      ...(pnJid !== id ? { phoneNumber: pnJid } : {}), ...(lidJid && lidJid !== id ? { lid: lidJid } : {}) };
     try {
       if (this.sock !== sock) throw new RequestError(409, 'Instance connection changed after contact update.');
       const contact = this.profileDependencies.onContact ? await this.profileDependencies.onContact(accepted, sock)
