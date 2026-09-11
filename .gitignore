@@ -7,7 +7,6 @@
 
 #packages
 /yarn.lock
-/package-lock.json
 
 #VsCode
 .vscode/*
@@ -24,3 +23,13 @@
 /src/generated/prisma
 
 /src/generated/prisma
+
+/webhook-queue/
+/webhook/
+/storage/
+/coverage/
+*.log
+.env.*
+!.env.example
+
+pull.log

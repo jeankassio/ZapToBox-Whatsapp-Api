@@ -47,12 +47,13 @@ test('contact edit route scopes authorization, rejects invalid input and never m
 
 test('contact edit preserves aliases and uses the actual Baileys app-state contact patch contract', async t => {
   const f = await fixture(t);
+  const normalizedLid = `${lid.split('@')[0]}@lid`;
   f.deps.repository = { ...repository, getContactById: async () => ({ id: lid, phoneNumber: jid, name: 'Antigo', notify: 'Perfil' }) };
-  const result = await f.request({ remoteJid: `${lid.split('@')[0]}:2@lid`, name: 'Novo nome' });
-  assert.equal(result.status, 200); assert.equal(f.changes[0].id, jid);
+  const result = await f.request({ remoteJid: `${normalizedLid.split('@')[0]}:2@lid`, name: 'Novo nome' });
+  assert.equal(result.status, 200); assert.equal(f.changes[0].id, normalizedLid);
   assert.deepEqual(f.changes[0].contact, { fullName: 'Novo nome', saveOnPrimaryAddressbook: true });
-  const patch = chatModificationToAppPatch({ contact: f.changes[0].contact }, jid);
-  assert.equal(patch.type, 'critical_unblock_low'); assert.deepEqual(patch.index, ['contact', jid]);
+  const patch = chatModificationToAppPatch({ contact: f.changes[0].contact }, normalizedLid);
+  assert.equal(patch.type, 'critical_unblock_low'); assert.deepEqual(patch.index, ['contact', normalizedLid]);
   assert.equal(patch.syncAction.contactAction?.fullName, 'Novo nome');
   assert.equal(result.body.data.contact.savedName, 'Novo nome'); assert.equal(result.body.data.contact.phoneNumber, jid);
   assert.equal(result.body.data.contact.nameSource, 'saved'); assert.ok(Date.parse(result.body.data.contact.savedNameUpdatedAt));

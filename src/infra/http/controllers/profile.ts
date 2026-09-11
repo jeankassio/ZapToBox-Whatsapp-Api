@@ -30,15 +30,12 @@ export default class ProfileController extends SocketController {
     if (typeof sock.addOrEditContact !== 'function') throw new RequestError(501, 'Contact editing is unavailable in this WhatsApp provider.');
     const id = remoteJid.replace(/:\d+@/, '@'), fullName = name.trim();
     const existing = await this.repository!.getContactById(this.instance, id);
-    const identifiers = [id, existing?.id, existing?.phoneNumber, existing?.lid];
-    const pnJid = identifiers.find(value => value && /^\d{5,20}@s\.whatsapp\.net$/.test(value));
-    if (!pnJid) throw new RequestError(422, 'The phone number for this contact could not be confirmed. Save it on the phone or wait for contact synchronization.');
     if (this.sock !== sock) throw new RequestError(409, 'Instance connection changed during contact lookup.');
     // rc14 waits for the app-state IQ response and persists its version before
     // resolving. A rejected/uncertain provider operation must not become a local rename.
-    await sock.addOrEditContact(pnJid, { fullName, saveOnPrimaryAddressbook: true });
+    await sock.addOrEditContact(id, { fullName, saveOnPrimaryAddressbook: true });
     const accepted: Contact = { id, name: fullName, savedName: fullName, savedNameUpdatedAt: new Date().toISOString(), nameSource: 'saved',
-      ...(pnJid !== id ? { phoneNumber: pnJid } : {}), ...(existing?.lid && existing.lid !== id ? { lid: existing.lid } : {}) };
+      ...(existing?.phoneNumber ? { phoneNumber: existing.phoneNumber } : {}), ...(existing?.lid && existing.lid !== id ? { lid: existing.lid } : {}) };
     try {
       if (this.sock !== sock) throw new RequestError(409, 'Instance connection changed after contact update.');
       const contact = this.profileDependencies.onContact ? await this.profileDependencies.onContact(accepted, sock)
