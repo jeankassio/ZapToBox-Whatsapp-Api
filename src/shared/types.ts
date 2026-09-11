@@ -148,7 +148,7 @@ export interface AudioMessage extends ViewOnceMessage{
     url: string
   },
   mimetype: string,
-  ptv?: boolean
+  ptt?: boolean
 }
 
 export interface DocumentMessage{

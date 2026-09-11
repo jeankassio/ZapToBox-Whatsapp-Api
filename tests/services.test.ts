@@ -77,6 +77,36 @@ async function fixture(t: any, options: { registered?: boolean; qrLinked?: boole
   return { instance, auth, authRepository, sockets, webhooks, stored, lookups, store, key, owner, flush, start, deleted: () => deletes, pairingRequests: () => pairingRequests };
 }
 
+test('presence caches and publishes at receipt time while history storage is blocked, then clears on shutdown', async t => {
+  const f = await fixture(t); await f.start(); const entered = deferred(), release = deferred();
+  f.store.saveManyMessages = async () => { entered.resolve(); await release.promise; };
+  f.sockets[0].ev.emit('messaging-history.set', { messages: [{ key: { id: 'history', remoteJid: '5511999999999@s.whatsapp.net' }, message: { conversation: 'old' } }], chats: [], contacts: [], isLatest: false });
+  await entered.promise;
+  const id = '5511999999999@s.whatsapp.net', lastSeen = Math.floor(Date.now() / 1000) - 50;
+  f.sockets[0].ev.emit('presence.update', { id: id.replace('@', ':7@'), presences: { [id]: { lastKnownPresence: 'unavailable', lastSeen } } });
+  const snapshot = f.instance.getPresence(id);
+  assert.equal(snapshot.presences[id]?.lastSeen, lastSeen); assert.ok(snapshot.observedAt);
+  await tick();
+  assert.deepEqual(f.webhooks.find(item => item.event === 'presence.update')!.data, snapshot, 'presence must not wait behind a history batch');
+  release.resolve(); await f.flush(); await f.instance.shutdown();
+  assert.equal(f.instance.getPresence(id).observedAt, null);
+  f.sockets[0].ev.emit('presence.update', { id, presences: { [id]: { lastKnownPresence: 'available' } } });
+  assert.equal(f.instance.getPresence(id).observedAt, null);
+});
+
+test('presence subscribe correlates stored Signal PN/LID aliases, deduplicates calls and never changes own presence', async t => {
+  const f = await fixture(t); await f.start();
+  const id = '5511999999999@s.whatsapp.net', lid = '123456789012345@lid'; let calls = 0;
+  await f.auth.state.keys.set({ 'lid-mapping': { '5511999999999': '123456789012345', '123456789012345_reverse': '5511999999999' } });
+  f.sockets[0].presenceSubscribe = async (jid: string) => { assert.equal(jid, id); calls++; f.sockets[0].ev.emit('presence.update', { id: lid, presences: { [lid]: { lastKnownPresence: 'composing' } } }); };
+  f.sockets[0].sendPresenceUpdate = async () => { throw new Error('Own presence must not change'); };
+  const [first, second] = await Promise.all([f.instance.subscribePresence(id, f.sockets[0]), f.instance.subscribePresence(id, f.sockets[0])]);
+  assert.equal(calls, 1); assert.deepEqual(first, second); assert.equal(first.id, id); assert.deepEqual(first.presences, { [id]: { lastKnownPresence: 'composing' } });
+  await f.instance.subscribePresence(id, f.sockets[0]); assert.equal(calls, 1);
+  await f.flush(); assert.deepEqual(f.webhooks.find(item => item.event === 'presence.update')!.data, first);
+  await f.instance.shutdown(); await assert.rejects(f.instance.subscribePresence(id, f.sockets[0]), (error: any) => error.statusCode === 409);
+});
+
 test('acknowledged contact edits persist and publish canonical names independently of provider echoes', async t => {
   const f = await fixture(t); await f.start();
   const id = '5511999999999@s.whatsapp.net';

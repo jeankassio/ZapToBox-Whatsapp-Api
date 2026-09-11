@@ -26,6 +26,7 @@ import { HistoryProgressTracker } from './history-progress.js';
 import { webhookChunks, WEBHOOK_CHUNK_ITEMS } from '../webhook/chunks.js';
 import { RequestError } from '../http/controllers/base.js';
 import { renewedMediaPath } from './media-reupload.js';
+import { PresenceState, presenceJid, type PresenceSnapshot } from './presence-state.js';
 
 type StartData = { owner: string; instanceName: string; phoneNumber?: string | undefined };
 type ConnectResult = { instance: InstanceInfo; qrCode?: string; pairingCode?: string };
@@ -84,6 +85,7 @@ export default class Instance {
   private userDevicesCache = new BoundedCache(1024, 300);
   private groupCache = new BoundedCache(128, 300);
   private contactObservedAt = 0;
+  private readonly presenceState = new PresenceState();
 
   constructor(dependencies: Partial<InstanceDependencies> = {}) {
     this.dependencies = {
@@ -100,6 +102,26 @@ export default class Instance {
 
   getSock(): WASocket | undefined { return this.sock; }
   getHistoryActivity() { return this.history?.activity; }
+  getPresence(remoteJid: string): PresenceSnapshot { return this.presenceState.snapshot(remoteJid); }
+  async subscribePresence(remoteJid: string, expectedSocket: WASocket): Promise<PresenceSnapshot> {
+    const id = presenceJid(remoteJid), generation = this.generation;
+    if (!id) throw new RequestError(400, 'An individual WhatsApp contact is required.');
+    const assertCurrent = () => { if (this.stopped || this.sock !== expectedSocket || generation !== this.generation || this.instance?.connectionStatus !== 'ONLINE' || expectedSocket.ws?.isOpen === false) throw new RequestError(409, 'Instance not connected.'); };
+    assertCurrent();
+    const snapshot = await this.presenceState.subscribe(id, async active => {
+      assertCurrent();
+      const user = id.split('@')[0]!, key = id.endsWith('@lid') ? `${user}_reverse` : user;
+      const mapping = await expectedSocket.authState.keys.get('lid-mapping', [key]);
+      assertCurrent();
+      if (!active()) throw new RequestError(504, 'Presence subscription timed out.');
+      const alias = typeof mapping[key] === 'string' ? presenceJid(`${mapping[key]}@${id.endsWith('@lid') ? 's.whatsapp.net' : 'lid'}`) : undefined;
+      this.presenceState.link(id, alias ? [id, alias] : [id]);
+      await expectedSocket.presenceSubscribe(id);
+      assertCurrent();
+    });
+    assertCurrent();
+    return snapshot;
+  }
 
   create(data: StartData): Promise<ConnectResult> {
     const key = instanceKey(String(data.owner), String(data.instanceName));
@@ -237,6 +259,7 @@ export default class Instance {
   }
 
   private detachSocket(): void {
+    this.presenceState.clear();
     const old = this.sock;
     this.sock = undefined;
     if (this.instance) delete this.instance.socket;
@@ -312,6 +335,12 @@ export default class Instance {
     let socketClosed = false;
     const connected = () => !socketClosed && !this.stopped && generation === this.generation && this.sock === sock
       && this.instance?.connectionStatus === 'ONLINE' && sock.ws?.isOpen !== false;
+    sock.ev.on('presence.update', data => {
+      if (!connected()) return;
+      // Capture/cache before the history queue; metadata continues to describe
+      // receipt time even if the durable webhook outbox delivers much later.
+      for (const snapshot of this.presenceState.observe(data)) this.backgroundEvent(this.emit('presence.update', snapshot, generation), 'presence update');
+    });
     const closeReason = (update: BaileysEventMap['connection.update']) => (update.lastDisconnect?.error as { output?: { statusCode?: number } } | undefined)?.output?.statusCode;
     const on = <K extends keyof BaileysEventMap>(event: K, handler: (data: BaileysEventMap[K], receivedWhileConnected: boolean) => Promise<void>) => {
       sock.ev.on(event, data => {
@@ -508,7 +537,7 @@ export default class Instance {
     on('groups.upsert', async data => { for (const group of data) this.groupCache.set(group.id, group); const rows = data.map(group => groupSpaceRecord(group, true)); await this.dependencies.store.saveManyChats(this.key, rows); await emit('groups.upsert', data.map((group, index) => ({ ...group, ...rows[index] }))); });
     on('groups.update', async data => { for (const group of data) if (group.id) this.groupCache.del(group.id); const valid = data.filter((group): group is typeof group & { id: string } => Boolean(group.id)); const rows = valid.map(group => groupSpaceRecord(group, isCompleteGroupMetadata(group))); await this.dependencies.store.saveManyChats(this.key, rows); await emit('groups.update', valid.map((group, index) => ({ ...group, ...rows[index] }))); });
     on('group-participants.update', async data => { this.groupCache.del(data.id); await emit('group-participants.update', data); });
-    const passthrough = ['presence.update', 'messages.reaction', 'message-receipt.update', 'group.join-request', 'blocklist.set', 'blocklist.update', 'call', 'labels.edit', 'labels.association', 'newsletter.reaction', 'newsletter.view', 'newsletter-participants.update', 'newsletter-settings.update'] as const;
+    const passthrough = ['messages.reaction', 'message-receipt.update', 'group.join-request', 'blocklist.set', 'blocklist.update', 'call', 'labels.edit', 'labels.association', 'newsletter.reaction', 'newsletter.view', 'newsletter-participants.update', 'newsletter-settings.update'] as const;
     for (const event of passthrough) on(event, data => emit(event, data));
   }
 

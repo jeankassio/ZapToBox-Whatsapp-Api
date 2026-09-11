@@ -4,6 +4,7 @@ import { normalizeJid } from '../../../shared/guards.js';
 import { SocketController, RequestError, type ControllerDependencies, type ControllerResult } from './base.js';
 import { downloadPublicMedia } from './remote-media.js';
 import { linkPreviewService } from '../../link-preview/service.js';
+import { audioMime, validateAudioBytes } from './audio-format.js';
 
 type Options = Record<string, any> | undefined;
 type MessageDependencies = ControllerDependencies & { fetchMedia?: (url: string) => Promise<Buffer>; getLinkPreview?: (connection: string, text: string) => Promise<WAUrlInfo | null> };
@@ -43,7 +44,15 @@ export default class MessagesController extends SocketController {
   async sendMessageImage(message: ImageMessage, options?: Options) { return this.sendMessage({ image: await this.mediaBuffer(message.image.url), ...this.metadata(message, ['caption', 'viewOnce']) }, await this.filterOptions(options)); }
   async sendMessageVideo(message: VideoMessage, options?: Options) { return this.sendMessage({ video: await this.mediaBuffer(message.video.url), ...this.metadata(message, ['caption', 'viewOnce', 'ptv']) }, await this.filterOptions(options)); }
   async sendMessageGif(message: GifMessage, options?: Options) { return this.sendMessage({ video: await this.mediaBuffer(message.video.url), gifPlayback: true, ...this.metadata(message, ['caption', 'viewOnce', 'ptv']) }, await this.filterOptions(options)); }
-  async sendMessageAudio(message: AudioMessage, options?: Options) { return this.sendMessage({ audio: await this.mediaBuffer(message.audio.url), mimetype: message.mimetype, ...this.metadata(message, ['ptt', 'viewOnce']) }, await this.filterOptions(options)); }
+  async sendMessageAudio(message: AudioMessage, options?: Options) {
+    const sock = this.sock;
+    const declaredMime = audioMime(message.mimetype, message.ptt);
+    const audio = await this.mediaBuffer(message.audio.url);
+    const mimetype = validateAudioBytes(audio, declaredMime, message.ptt);
+    const filtered = await this.filterOptions(options);
+    if (this.sock !== sock) throw new RequestError(409, 'Instance connection changed before sending.');
+    return this.sendMessage({ audio, mimetype, ...this.metadata(message, ['ptt', 'viewOnce']) }, filtered);
+  }
   async sendMessageDocument(message: DocumentMessage, options?: Options) { return this.sendMessage({ document: await this.mediaBuffer(message.document.url), mimetype: message.mimetype, fileName: message.fileName }, await this.filterOptions(options)); }
   async sendMessageSticker(message: StickerMessage, options?: Options) { return this.sendMessage({ sticker: await this.mediaBuffer(message.sticker.url), ...this.metadata(message, ['isAnimated']) }, await this.filterOptions(options)); }
   async sendMessageForward(message: ForwardMessage, options?: Options) { return this.sendMessage({ forward: await this.stored(message.forward) }, await this.filterOptions(options)); }
@@ -70,7 +79,8 @@ export default class MessagesController extends SocketController {
       const content = 'text' in message ? { ...message, linkPreview } : message;
       const sent = await sock.sendMessage(this.jid, content, options);
       if (!sent?.key?.id) throw new RequestError(502, 'WhatsApp did not return a message identifier.');
-      // A confirmed send must not become a failure that invites duplicate retries if persistence is unavailable.
+      // A completed relay must not invite duplicate retries if local persistence is unavailable.
+      // Delivery is confirmed later by receipts; Baileys generated this identifier before the relay.
       let syncPending = false;
       try { await this.persistSent(sent); } catch { syncPending = true; }
       return { sent, syncPending };
