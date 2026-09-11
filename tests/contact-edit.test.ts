@@ -49,10 +49,10 @@ test('contact edit preserves aliases and uses the actual Baileys app-state conta
   const f = await fixture(t);
   f.deps.repository = { ...repository, getContactById: async () => ({ id: lid, phoneNumber: jid, name: 'Antigo', notify: 'Perfil' }) };
   const result = await f.request({ remoteJid: `${lid.split('@')[0]}:2@lid`, name: 'Novo nome' });
-  assert.equal(result.status, 200); assert.equal(f.changes[0].id, lid);
-  assert.deepEqual(f.changes[0].contact, { fullName: 'Novo nome', pnJid: jid, lidJid: lid, saveOnPrimaryAddressbook: true });
-  const patch = chatModificationToAppPatch({ contact: f.changes[0].contact }, lid);
-  assert.equal(patch.type, 'critical_unblock_low'); assert.deepEqual(patch.index, ['contact', lid]);
+  assert.equal(result.status, 200); assert.equal(f.changes[0].id, jid);
+  assert.deepEqual(f.changes[0].contact, { fullName: 'Novo nome', saveOnPrimaryAddressbook: true });
+  const patch = chatModificationToAppPatch({ contact: f.changes[0].contact }, jid);
+  assert.equal(patch.type, 'critical_unblock_low'); assert.deepEqual(patch.index, ['contact', jid]);
   assert.equal(patch.syncAction.contactAction?.fullName, 'Novo nome');
   assert.equal(result.body.data.contact.savedName, 'Novo nome'); assert.equal(result.body.data.contact.phoneNumber, jid);
   assert.equal(result.body.data.contact.nameSource, 'saved'); assert.ok(Date.parse(result.body.data.contact.savedNameUpdatedAt));
