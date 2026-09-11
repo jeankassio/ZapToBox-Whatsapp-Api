@@ -16,6 +16,9 @@ async function serialized<T>(instance: string, work: () => Promise<T>): Promise<
 }
 
 export default class PrismaConnection {
+  static async getMessageThumbnailPayloads(instance: string, messageIds: string[], remoteJid?: string) {
+    return prisma.message.findMany({ where: { instance, messageId: { in: messageIds }, ...(remoteJid ? { remoteJid } : {}) }, select: { messageId: true, content: true } });
+  }
   private static async chatWhere(instance:string,remoteJid:string):Promise<Prisma.MessageWhereInput> {
     const contact=await prisma.contact.findFirst({where:{instance,OR:[{jid:remoteJid},{lid:remoteJid}]}});
     const aliases=[...new Set([remoteJid,contact?.jid,contact?.lid].filter((value):value is string=>!!value))];

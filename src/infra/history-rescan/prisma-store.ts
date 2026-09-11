@@ -96,7 +96,7 @@ export class PrismaRescanStore implements RescanStore {
       const message = MessageMapper.toWAMessage(row), protocol = message.message?.protocolMessage;
       const visible = message.message && !message.message.senderKeyDistributionMessage && (!protocol || protocol.type === proto.Message.ProtocolMessage.Type.REVOKE || protocol.type === proto.Message.ProtocolMessage.Type.MESSAGE_EDIT);
       const marker = sourceEdit((row.content as Record<string, unknown>)?.sourceEdit);
-      return { id: row.id, data: visible ? { ...serializeBaileys(message), messageType: getContentType(message.message!),
+      return { id: row.id, data: visible ? { ...serializeBaileys(message), messageType: getContentType(message.message!), messageSource: 'history',
         ...(isEditedMessage(message.message) ? { edited: true } : {}), ...(marker ? { sourceEdit: marker } : {}) } : null };
     });
   }

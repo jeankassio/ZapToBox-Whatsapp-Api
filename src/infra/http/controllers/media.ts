@@ -3,8 +3,12 @@ import { SocketController, RequestError, type ControllerDependencies, type Contr
 import { reuploadHistoricalMedia } from '../../baileys/media-reupload.js';
 import { collectMedia, mediaDownloadBudget, untilAborted, trackMediaDownload } from './media-budget.js';
 import { messageTimestamp } from '../../mappers/messageMapper.js';
+import PrismaConnection from '../../../core/connection/prisma.js';
+import { embeddedJpegThumbnail } from '../../mappers/thumbnail.js';
+import { isMessageId, isJid } from '../../../shared/guards.js';
 
-type MediaDependencies = ControllerDependencies & { download?: typeof downloadMediaMessage; reupload?: typeof reuploadHistoricalMedia };
+export type MediaDependencies = ControllerDependencies & { download?: typeof downloadMediaMessage; reupload?: typeof reuploadHistoricalMedia;
+  thumbnailPayloads?: typeof PrismaConnection.getMessageThumbnailPayloads };
 
 function upstreamStatus(error: unknown): number | undefined {
   const failure = error as { status?: number; output?: { statusCode?: number } } | null;
@@ -14,7 +18,19 @@ function upstreamStatus(error: unknown): number | undefined {
 export default class MediaController extends SocketController {
   private readonly download: typeof downloadMediaMessage;
   private readonly reupload: typeof reuploadHistoricalMedia;
-  constructor(owner: string, instanceName: string, dependencies: MediaDependencies = {}) { super(owner, instanceName, dependencies); this.download = dependencies.download ?? downloadMediaMessage; this.reupload = dependencies.reupload ?? reuploadHistoricalMedia; }
+  private readonly thumbnailPayloads: typeof PrismaConnection.getMessageThumbnailPayloads;
+  constructor(owner: string, instanceName: string, dependencies: MediaDependencies = {}) { super(owner, instanceName, dependencies); this.download = dependencies.download ?? downloadMediaMessage; this.reupload = dependencies.reupload ?? reuploadHistoricalMedia; this.thumbnailPayloads = dependencies.thumbnailPayloads ?? PrismaConnection.getMessageThumbnailPayloads; }
+  async thumbnails(messageIds: string[], remoteJid?: string): Promise<ControllerResult> {
+    if (!Array.isArray(messageIds) || messageIds.length < 1 || messageIds.length > 40 || !messageIds.every(isMessageId) || (remoteJid !== undefined && !isJid(remoteJid))) return { success: false, statusCode: 400, error: 'Invalid thumbnail query.' };
+    const ids = [...new Set(messageIds)];
+    // Deliberately independent of the socket: cached thumbnails remain usable
+    // offline and this path never requests/decrypts an original media file.
+    const rows = await this.thumbnailPayloads(this.instance, ids, remoteJid);
+    const indexed = new Map(rows.map(row => [row.messageId, row.content]));
+    const items = [];
+    for (const messageId of ids) items.push({ messageId, thumbnail: await embeddedJpegThumbnail(indexed.get(messageId)) });
+    return { success: true, data: { items } };
+  }
   async getMedia(messageId: string, isBase64 = false, remoteJid?: string): Promise<ControllerResult> {
     const result = await this.perform('Media downloaded.', async sock => mediaDownloadBudget.run(async () => {
       const abort = new AbortController();

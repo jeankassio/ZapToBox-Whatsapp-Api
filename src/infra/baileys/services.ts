@@ -12,7 +12,7 @@ import { baileysEvents, instanceConnection, instances, instanceStatus, sessionsP
 import { instanceKey } from '../../shared/identity.js';
 import { publicInstanceInfo, updateConnectionStatus } from '../../shared/instance-info.js';
 import { genProxy, removeInstancePath, trySendWebhook } from '../../shared/utils.js';
-import type { ConnectionState, ConnectionStatus, Contact, HistoryChunkMetadata, InstanceData, InstanceInfo } from '../../shared/types.js';
+import type { ConnectionState, ConnectionStatus, Contact, HistoryChunkMetadata, InstanceData, InstanceInfo, MessageWebhook } from '../../shared/types.js';
 import UserConfig from '../config/env.js';
 import PrismaConnection from '../../core/connection/prisma.js';
 import { loadInstanceAuth, safeSessionDirectory, type PersistentAuth } from '../state/auth-state.js';
@@ -20,6 +20,7 @@ import { messageTimestamp, serializeBaileys, sourceEdit } from '../mappers/messa
 import { groupSpaceRecord, isCompleteGroupMetadata } from '../mappers/spaces.js';
 import { noteGroupSpaceChanges } from './sections-state.js';
 import { observeContact } from '../mappers/contactMapper.js';
+import { upsertMessageSource } from '../mappers/message-source.js';
 import { HistoryProgressTracker } from './history-progress.js';
 import { webhookChunks, WEBHOOK_CHUNK_ITEMS } from '../webhook/chunks.js';
 import { RequestError } from '../http/controllers/base.js';
@@ -311,8 +312,9 @@ export default class Instance {
     const connected = () => !socketClosed && !this.stopped && generation === this.generation && this.sock === sock
       && this.instance?.connectionStatus === 'ONLINE' && sock.ws?.isOpen !== false;
     const closeReason = (update: BaileysEventMap['connection.update']) => (update.lastDisconnect?.error as { output?: { statusCode?: number } } | undefined)?.output?.statusCode;
-    const on = <K extends keyof BaileysEventMap>(event: K, handler: (data: BaileysEventMap[K]) => Promise<void>) => {
+    const on = <K extends keyof BaileysEventMap>(event: K, handler: (data: BaileysEventMap[K], receivedWhileConnected: boolean) => Promise<void>) => {
       sock.ev.on(event, data => {
+        const receivedWhileConnected = connected();
         if (event === 'contacts.upsert' || event === 'contacts.update' || event === 'messaging-history.set') {
           const observedAt = new Date(this.contactObservedAt = Math.max(Date.now(), this.contactObservedAt + 1)).toISOString();
           if (event === 'messaging-history.set') {
@@ -352,7 +354,7 @@ export default class Instance {
           if (socketClosed && event !== 'connection.update') return Promise.resolve();
           const imports = event === 'messaging-history.set' || /^(messages|contacts|chats)\./.test(event);
           if (imports && (this.instance?.connectionStatus !== 'ONLINE' || sock.ws?.isOpen === false)) return Promise.resolve();
-          return handler(data);
+          return handler(data, receivedWhileConnected);
         }, history);
         if (settleBatch) void queued.finally(settleBatch).catch(() => {});
       });
@@ -408,7 +410,7 @@ export default class Instance {
     on('messaging-history.status', async data => { await emit('messaging-history.progress', history.providerStatus(data)); });
     on('messaging-history.set', async ({ messages, chats, contacts, ...progress }) => {
       if (!connected()) return;
-      const visibleMessages = this.webhookMessages(messages);
+      const visibleMessages = this.webhookMessages(messages, 'history');
       // Plan all chunks before announcing the watermark. Never silently skip an
       // oversized entry, and count precisely the visible arrays that are sent.
       const plans = { contacts: webhookChunks(contacts), chats: webhookChunks(chats), messages: webhookChunks(visibleMessages) };
@@ -450,9 +452,9 @@ export default class Instance {
       }
       await emit('messaging-history.progress', history.importedBatch());
     });
-    on('messages.upsert', async ({ messages }) => {
-      await this.dependencies.store.saveManyMessages(this.key, messages);
-      const visible = this.webhookMessages(messages);
+    on('messages.upsert', async (upsert, receivedWhileConnected) => {
+      await this.dependencies.store.saveManyMessages(this.key, upsert.messages);
+      const visible = this.webhookMessages(upsert.messages, upsertMessageSource(upsert, receivedWhileConnected));
       if (visible.length) await emit('messages.upsert', visible);
     });
     on('messages.update', async updates => {
@@ -515,9 +517,10 @@ export default class Instance {
     return !protocol || protocol.type === proto.Message.ProtocolMessage.Type.REVOKE || protocol.type === proto.Message.ProtocolMessage.Type.MESSAGE_EDIT;
   }
 
-  private webhookMessages(messages: WAMessage[]): unknown[] {
+  private webhookMessages(messages: WAMessage[], messageSource: NonNullable<MessageWebhook['messageSource']> = 'unknown'): unknown[] {
     return messages.filter(message => this.isWebhookMessage(message)).map(message => ({
       ...serializeBaileys(message), messageTimestamp: messageTimestamp(message.messageTimestamp), messageType: getContentType(message.message!),
+      messageSource,
     }));
   }
 
@@ -657,7 +660,7 @@ export default class Instance {
   async publishSentMessage(sentMessage: WAMessage): Promise<void> {
     if (!this.key || this.stopped) throw new Error('Instance is not connected');
     await this.dependencies.store.saveMessages(this.key, sentMessage);
-    await this.emit('send.message', this.webhookMessages([sentMessage]));
+    await this.emit('send.message', this.webhookMessages([sentMessage], 'sent'));
   }
 
   /** Persist an acknowledged address-book edit even when emitOwnEvents is off. */

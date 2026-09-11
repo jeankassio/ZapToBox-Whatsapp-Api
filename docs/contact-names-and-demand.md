@@ -16,6 +16,21 @@ O sucesso retorna `{ "success": true, "data": { "contact": { "id": "...", "name"
 
 `POST /messages/readMessages/:owner/:instanceName` recebe `{ remoteJid, messageIds }` com 1 a 100 IDs por lote. Todos os IDs são validados na mesma instância/conversa antes de enviar qualquer recibo; IDs repetidos e mensagens enviadas pela própria conta não geram recibos duplicados. O backend do atendimento calcula o limite cronológico da mensagem visível e seleciona todas as mensagens anteriores elegíveis, enviando lotes para essa rota. A API não precisa consultar novamente o histórico inteiro para cada lote.
 
-A API não baixa anexos recebidos durante a importação ou no webhook de mensagens: persiste o payload e as chaves necessárias para recuperar os arquivos quando solicitados. O download ocorre na rota explícita `/media/download`; o frontend/backend decide quando a mídia está visível. O download do pacote de sincronização pelo Baileys e a obtenção de arquivos para um envio solicitado são operações diferentes dos anexos recebidos.
+A API persiste o payload e as chaves necessárias para recuperar anexos na rota `/media/download`. O backend inicia sua fila de downloads ao receber uma mensagem nova; anexos importados pelo histórico permanecem sob demanda quando ficam visíveis. O download do pacote de sincronização pelo Baileys e a obtenção de arquivos para um envio solicitado são operações diferentes dos anexos recebidos.
+
+Cada item dos webhooks de mensagens inclui `messageSource`, independente de `key.fromMe`:
+
+| Origem | Evidência na API | Comportamento do backend |
+| --- | --- | --- |
+| `live` | `messages.upsert` com `type: notify`, recebido com socket conectado | Baixa mídia de um registro novo pela fila existente |
+| `offline` | `messages.upsert` com `type: append`, entrega pendente após reconectar | Baixa mídia de um registro novo pela fila existente |
+| `sent` | Envio confirmado por esta API, evento `send.message` | Baixa mídia nova se ainda precisar de cache |
+| `history` | Sincronização natural ou reimportação do armazenamento, `messages.set` | Sob demanda |
+| `recovery` | Recuperação do telefone identificada por `requestId` | Sob demanda; não promove histórico recuperado a mensagem nova |
+| `unknown` | Origem ausente/desconhecida ou `notify` observado antes de conectar | Sob demanda |
+
+O [provider rc14](https://github.com/WhiskeySockets/Baileys/blob/v7.0.0-rc14/src/Socket/messages-recv.ts) distingue a entrega pendente (`append`) da nova notificação (`notify`). A API captura o estado conectado antes de sua fila de persistência, preserva mensagens novas recebidas durante uma sincronização e não usa a idade da mensagem para inferir sua origem. A compatibilidade aplicada por `tools/patch-provider-streams.mjs` também conserva `requestId` no buffer do Baileys e separa lotes com origens diferentes. Sem essa correção, uma recuperação do telefone poderia sair do buffer como notificação nova.
+
+Histórico/chunks sempre prevalecem sobre a origem individual. O backend só solicita download automático na primeira inserção; repetir um webhook ou receber um eco de mensagem já importada não dispara uma descarga do histórico. API e backend devem ser atualizados juntos para esta política: consumidores antigos ignoram o campo adicional, e o backend atualizado mantém mensagens sem origem conhecida sob demanda. Fila, concorrência e repetição após falhas permanecem sob controle do backend; a importação da API não baixa todos os anexos por conta própria.
 
 `POST /profile/fetchProfilePicture/:owner/:instanceName` sempre consulta o provedor, sem cache local da URL. Não exige parâmetro `refresh`. O resultado fica em `data.status` (URL ou `null` para foto ausente/restrita); falhas transitórias retornam erro, para que não apaguem uma foto conhecida. A consulta usa prazo de 10 segundos e rejeita resultado tardio de uma sessão desconectada.

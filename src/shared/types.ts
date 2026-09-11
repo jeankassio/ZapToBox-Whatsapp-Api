@@ -50,6 +50,7 @@ export interface HistoryChunkMetadata {
 
 export interface MessageWebhook extends WAMessage{
   messageType?: string;
+  messageSource?: 'live' | 'offline' | 'history' | 'recovery' | 'sent' | 'unknown';
 }
 
 export interface ProxyAgent{

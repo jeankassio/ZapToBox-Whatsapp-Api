@@ -331,6 +331,31 @@ test('shutdown drains Signal reads and rejects late socket key writes without to
   assert.equal(f.lookups.length, 0);
 });
 
+test('message webhooks distinguish live, offline, recovery and synchronized history without fetching media', async t => {
+  const f = await fixture(t); await f.start();
+  const image = (id: string): WAMessage => ({ key: { id, remoteJid: '5511999999999@s.whatsapp.net', fromMe: false }, message: { imageMessage: { mediaKey: Buffer.from([1, 2, 3]), directPath: '/encrypted-image' } } });
+  f.sockets[0].ev.emit('messaging-history.set', { messages: [image('history')], contacts: [], chats: [], isLatest: false });
+  for (const [id, type, requestId] of [['live', 'notify', undefined], ['offline', 'append', undefined], ['recovery', 'notify', 'phone-request']] as const) {
+    f.sockets[0].ev.emit('messages.upsert', { type, requestId, messages: [image(id)] });
+  }
+  await f.flush();
+  const received = f.webhooks.filter(item => item.event === 'messages.set' || item.event === 'messages.upsert').flatMap(item => item.data);
+  assert.deepEqual(received.map(item => [item.key.id, item.messageSource]), [['history', 'history'], ['live', 'live'], ['offline', 'offline'], ['recovery', 'recovery']]);
+  assert.equal(f.lookups.length, 0);
+  for (const item of received) assert.equal(item.message.imageMessage.directPath, '/encrypted-image');
+  await f.instance.publishSentMessage({ ...image('sent'), key: { ...image('sent').key, fromMe: true } });
+  assert.equal(f.webhooks.at(-1)!.data[0].messageSource, 'sent');
+});
+
+test('an event queued before connection opening cannot acquire live provenance while waiting for storage', async t => {
+  const f = await fixture(t); await f.start();
+  f.instance.setStatus('OFFLINE');
+  f.sockets[0].ev.emit('messages.upsert', { type: 'notify', messages: [{ key: { id: 'before-open', remoteJid: '5511999999999@s.whatsapp.net' }, message: { conversation: 'pending' } }] });
+  f.sockets[0].ev.emit('connection.update', { connection: 'open' });
+  await f.flush();
+  assert.equal(f.webhooks.find(item => item.event === 'messages.upsert')!.data[0].messageSource, 'unknown');
+});
+
 test('getMessage is scoped, returns missing as undefined, and sent edit/revoke/media events retain content', async t => {
   const f = await fixture(t); await f.start();
   assert.equal(await f.instance.getMessage({ id: 'absent', remoteJid: '2@lid' }), undefined);
