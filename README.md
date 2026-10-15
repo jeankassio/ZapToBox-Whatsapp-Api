@@ -1,3 +1,4 @@
+[![Somora](https://somora.media/assets/somora-github-en.png)](https://somora.media)
 # ZapToBox WhatsApp API
 
 Serviço TypeScript/ESM para sessões WhatsApp, mensagens, grupos, perfil, privacidade, mídia e webhooks. Usa Node.js 24+, PostgreSQL/Prisma e **Baileys 7.0.0-rc14**, fixado no lockfile. Essa versão é uma **release candidate**, não a versão final 7.0.0. Referências: [release oficial](https://github.com/WhiskeySockets/Baileys/releases/tag/v7.0.0-rc14) e [migração para Baileys 7](https://baileys.wiki/migration/v7).
